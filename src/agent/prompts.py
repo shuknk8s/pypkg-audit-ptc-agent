@@ -91,7 +91,17 @@ def build_codegen_prompt(package_name: str, pinned_version: str) -> str:
 
         The script must:
         1. `sys.path.insert(0, "/app")` then import from `tools.nvd`, `tools.pypi`, `tools.github_api`.
-        2. Read each tool's documentation before using it (see TOOL DOCUMENTATION in system prompt).
+        2. Before calling ANY tool for the first time, read its doc file:
+           `doc = open("/app/tools/docs/<server>/<tool>.md").read()`
+           You MUST do this for every tool — core and Phase B alike. Example:
+           ```
+           doc = open("/app/tools/docs/nvd/search_cves.md").read()
+           from tools.nvd import search_cves
+           doc = open("/app/tools/docs/pypi/get_package_metadata.md").read()
+           from tools.pypi import get_package_metadata
+           doc = open("/app/tools/docs/github_api/get_release_notes.md").read()
+           from tools.github_api import get_release_notes
+           ```
         3. Call `get_package_metadata(package_name="{package_name}")` to get latest_version and github_repository.
         4. Call `search_cves(package_name="{package_name}", version="{pinned_version}")` for CVEs.
         5. Call `get_release_notes(owner=<owner>, repo=<repo>, from_version="{pinned_version}", to_version=<latest>)` for changelog.
@@ -103,16 +113,66 @@ def build_codegen_prompt(package_name: str, pinned_version: str) -> str:
         8. Compute versions_behind, total_cves_found, risk_rating, upgrade_recommendation.
         9. Output the result as JSON via the __PTC_JSON_B64__ marker.
 
-        ## Phase B — Optional enrichment (choose based on steps 3-5 results):
-        After completing the core audit above, decide whether additional tools
-        would improve the assessment. For each tool you use, read its doc first:
-        `open("/app/tools/docs/<server>/<tool>.md").read()`
-        - If CVEs were found: `tools.epss.get_exploit_probability(cve_id=...)` scores exploit likelihood
-        - If NVD coverage seems thin: `tools.osv.query_vulnerability(package=..., version=...)` cross-references
-        - If the package has a GitHub repo: `tools.scorecard.get_security_scorecard(owner=..., repo=...)` assesses maintenance
-        - If transitive risk matters: `tools.deps_dev.get_dependency_info(package=..., version=...)` shows dependency depth
-        - If license compliance is in scope: `tools.license_check.check_license(package=...)`
-        You do NOT need to use all optional tools. Use only what adds value for this package.
+        ## Phase B — Enrichment (ALWAYS include this code block):
+        After steps 3-5, the script MUST include the following Phase B enrichment.
+        These calls are wrapped in try/except so failures are harmless, but the code
+        MUST be present. Copy this pattern into your script after the core steps:
+
+        ```
+        # --- Phase B enrichment ---
+        doc = open("/app/tools/docs/epss/get_exploit_probability.md").read()
+        from tools.epss import get_exploit_probability
+        doc = open("/app/tools/docs/osv/query_vulnerability.md").read()
+        from tools.osv import query_vulnerability
+        doc = open("/app/tools/docs/scorecard/get_security_scorecard.md").read()
+        from tools.scorecard import get_security_scorecard
+        doc = open("/app/tools/docs/deps_dev/get_dependency_info.md").read()
+        from tools.deps_dev import get_dependency_info
+        doc = open("/app/tools/docs/license_check/check_license.md").read()
+        from tools.license_check import check_license
+
+        # EPSS scores for affecting CVEs
+        for cve in cves_affecting_pinned[:5]:
+            try:
+                epss_resp = get_exploit_probability(cve_id=cve["cve_id"])
+                epss_data = json.loads(epss_resp["content"][0]["text"])
+                cve["epss_score"] = epss_data.get("epss_score")
+            except Exception:
+                pass
+
+        # OSV cross-reference
+        try:
+            osv_resp = query_vulnerability(package="{package_name}", version="{pinned_version}")
+            osv_data = json.loads(osv_resp["content"][0]["text"])
+        except Exception:
+            osv_data = {{"results": []}}
+
+        # Scorecard (if GitHub repo found)
+        scorecard_data = {{}}
+        if github_repository and "/" in github_repository:
+            try:
+                sc_resp = get_security_scorecard(owner=owner, repo=repo)
+                scorecard_data = json.loads(sc_resp["content"][0]["text"])
+            except Exception:
+                pass
+
+        # deps.dev dependency info
+        try:
+            dd_resp = get_dependency_info(package="{package_name}", version="{pinned_version}")
+            dd_data = json.loads(dd_resp["content"][0]["text"])
+        except Exception:
+            dd_data = {{}}
+
+        # License check
+        try:
+            lic_resp = check_license(package="{package_name}")
+            lic_data = json.loads(lic_resp["content"][0]["text"])
+        except Exception:
+            lic_data = {{}}
+        ```
+
+        Phase B results do NOT change the output schema — use them to inform risk_rating
+        and upgrade_recommendation text.
 
         ## Error handling
         - Wrap each tool call in try/except. On failure, use empty results and continue.

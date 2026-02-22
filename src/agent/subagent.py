@@ -236,7 +236,7 @@ async def step_codegen(ctx: AuditContext) -> None:
     _track_tokens(ctx, response)
     ctx.script_source = _extract_code_block(response.content)
     ctx.servers_used = _check_ptd_compliance(ctx.script_source, ctx.package)
-    logger.info("LLM generated script for %s (%d chars)", ctx.package, len(ctx.script_source))
+    logger.info("LLM generated script for %s (%d chars, servers=%s)", ctx.package, len(ctx.script_source), sorted(ctx.servers_used))
     ctx.messages.append(response)
 
 

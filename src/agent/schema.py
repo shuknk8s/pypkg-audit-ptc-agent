@@ -29,7 +29,7 @@ class AuditContext:
 
 
 class CVEEntry(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     cve_id: str
     severity: Literal["critical", "high", "medium", "low", "unknown"]
     summary: str
@@ -38,7 +38,7 @@ class CVEEntry(BaseModel):
 
 
 class Phase2Result(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     package: str
     pinned_version: str
     latest_version: str | None

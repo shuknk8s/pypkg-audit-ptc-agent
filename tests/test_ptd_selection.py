@@ -166,10 +166,15 @@ def test_codegen_prompt_has_dynamic_selection():
     assert "get_package_metadata" in prompt
     assert "get_release_notes" in prompt
 
-    # Must mention Phase B optional tools
+    # Must mention Phase B tools with ALWAYS-include directive
     assert "Phase B" in prompt
     assert "tools.epss" in prompt
     assert "tools.scorecard" in prompt
     assert "tools.osv" in prompt
     assert "tools.deps_dev" in prompt
     assert "tools.license_check" in prompt
+    assert "ALWAYS include" in prompt  # Phase B code block is mandatory
+
+    # Must have explicit doc-read example in step 2 AND Phase B
+    assert 'open("/app/tools/docs/nvd/search_cves.md")' in prompt
+    assert 'open("/app/tools/docs/epss/get_exploit_probability.md")' in prompt

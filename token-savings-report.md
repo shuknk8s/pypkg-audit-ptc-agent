@@ -1,6 +1,6 @@
 # Token Savings Report — PTC + PTD vs Traditional ReAct
 
-**Generated:** 2026-02-22 21:02 UTC  
+**Generated:** 2026-02-22 21:28 UTC  
 **Architecture:** Programmatic Tool Calling (PTC) + Progressive Tool Discovery (PTD)  
 **Baseline:** Estimated traditional ReAct / function-calling loop
 
@@ -21,22 +21,22 @@ paid once). Net saving: ~500 tokens per codegen call.
 
 | Package | Actual tokens (PTC+PTD) | Est. ReAct baseline | PTC saved (tool resp) | PTC % | PTD saved (doc inject) | PTD % | Combined saved % |
 |---------|------------------------|---------------------|-----------------------|-------|------------------------|-------|------------------|
-| requests | 2,455 | 8,583 | 5,428 | 63.2% | 500 | 5.8% | **69.1%** |
-| flask | 2,385 | 8,988 | 5,903 | 65.7% | 500 | 5.6% | **71.2%** |
-| django | 2,474 | 8,628 | 5,454 | 63.2% | 500 | 5.8% | **69.0%** |
-| urllib3 | 2,582 | 6,717 | 3,435 | 51.1% | 500 | 7.4% | **58.6%** |
-| jinja2 | 2,566 | 11,172 | 7,906 | 70.8% | 500 | 4.5% | **75.2%** |
-| pyyaml | 2,496 | 4,222 | 1,026 | 24.3% | 500 | 11.8% | **36.1%** |
-| **TOTAL** | **14,958** | **48,310** | **29,152** | **60.3%** | **3,000** | **6.2%** | **66.6%** |
+| requests | 3,383 | 9,511 | 5,428 | 57.1% | 500 | 5.3% | **62.3%** |
+| flask | 3,366 | 10,643 | 6,577 | 61.8% | 500 | 4.7% | **66.5%** |
+| django | 3,351 | 9,540 | 5,489 | 57.5% | 500 | 5.2% | **62.8%** |
+| urllib3 | 3,357 | 7,522 | 3,465 | 46.1% | 500 | 6.6% | **52.7%** |
+| jinja2 | 3,396 | 12,019 | 7,923 | 65.9% | 500 | 4.2% | **70.1%** |
+| pyyaml | 3,350 | 5,088 | 1,038 | 20.4% | 500 | 9.8% | **30.2%** |
+| **TOTAL** | **20,203** | **54,323** | **29,920** | **55.1%** | **3,000** | **5.5%** | **60.6%** |
 
 ## Key numbers
 
-- **Combined token reduction:** 66.6% vs estimated ReAct baseline
-- **PTC contribution:** 60.3% — tool responses kept inside sandbox
-- **PTD contribution:** 6.2% — per-call doc injection eliminated
-- **Actual tokens spent:** 14,958 across 6 package(s)
-- **Estimated ReAct cost:** 48,310 tokens
-- **Total tokens saved:** 32,152
+- **Combined token reduction:** 60.6% vs estimated ReAct baseline
+- **PTC contribution:** 55.1% — tool responses kept inside sandbox
+- **PTD contribution:** 5.5% — per-call doc injection eliminated
+- **Actual tokens spent:** 20,203 across 6 package(s)
+- **Estimated ReAct cost:** 54,323 tokens
+- **Total tokens saved:** 32,920
 
 > **Estimation methodology:** ReAct baseline = actual PTC tokens + sandbox payload size ÷ 4
 > (chars-to-tokens approximation for raw tool responses that would have entered the LLM
