@@ -1,29 +1,53 @@
 #!/usr/bin/env python3
-"""PTC v4 dependency-gap audit entrypoint."""
+"""Dependency-gap audit entrypoint — LangGraph astream edition."""
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
+import structlog
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
+from src.agent.pipeline import create_audit_pipeline
 from src.agent.planner import parse_requirements_input
-from src.agent.pipeline import run_multi_package_audit
+from src.agent.synthesizer import synthesize_results
+
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.JSONRenderer(),
+    ]
+)
 
 console = Console()
 
+_tracer = None
+if os.getenv("LANGCHAIN_API_KEY"):
+    try:
+        from langchain.callbacks import LangChainTracer
+
+        _tracer = LangChainTracer(project_name="dep-audit-deepagent")
+    except Exception:
+        pass
+
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="PTC v4 dependency-gap audit")
-    parser.add_argument("requirements_file", help="Requirements file with pinned entries (pkg==version)")
+    parser = argparse.ArgumentParser(description="Dependency-gap audit — LangGraph Deep Agents")
+    parser.add_argument(
+        "requirements_file",
+        help="Requirements file with pinned entries (pkg==version)",
+    )
     parser.add_argument(
         "--model",
         choices=["openai", "local"],
@@ -43,12 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--show-llm-narrative",
         action="store_true",
-        help="Also render LLM narrative panel (off by default to avoid duplicate synthesis).",
+        help="Also render LLM narrative panel (off by default).",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
-        help="Enable INFO logging from sub-agents (script generation, CVE interpretation, changelog).",
+        help="Enable INFO logging from sub-agents.",
     )
     return parser
 
@@ -149,7 +174,6 @@ def _render_rich_output(result: dict) -> None:
         raw = str(text or "").strip()
         if not raw:
             return "N/A"
-        # Keep one-row readability by turning bullet lines into a delimited sentence.
         parts = []
         for line in raw.splitlines():
             s = line.strip()
@@ -206,26 +230,37 @@ def _render_rich_output(result: dict) -> None:
 
     detailed = synthesis.get("detailed_summary")
     if detailed:
-        console.print(Panel(str(detailed), title="Main Agent — Detailed Risk Synthesis", border_style="yellow"))
+        console.print(
+            Panel(
+                str(detailed),
+                title="Main Agent — Detailed Risk Synthesis",
+                border_style="yellow",
+            )
+        )
 
-    # Build a per-package savings lookup keyed by package name (fixes zip-alignment bug)
     pkg_savings_map = {
         r.get("package", ""): r.get("_token_savings")
         for r in package_rows
         if r.get("_token_savings")
     }
     if pkg_savings_map:
-        savings_rows = [pkg_savings_map[r.get("package", "")] for r in package_rows if r.get("package", "") in pkg_savings_map]
-        rows_with_savings = [r for r in package_rows if r.get("package", "") in pkg_savings_map]
+        savings_rows = [
+            pkg_savings_map[r.get("package", "")]
+            for r in package_rows
+            if r.get("package", "") in pkg_savings_map
+        ]
+        rows_with_savings = [
+            r for r in package_rows if r.get("package", "") in pkg_savings_map
+        ]
 
-        total_actual    = sum(s.get("ptc_actual_tokens", 0) for s in savings_rows)
-        total_react     = sum(s.get("estimated_react_total", 0) for s in savings_rows)
+        total_actual = sum(s.get("ptc_actual_tokens", 0) for s in savings_rows)
+        total_react = sum(s.get("estimated_react_total", 0) for s in savings_rows)
         total_ptc_saved = sum(s.get("ptc_tool_response_tokens_avoided", 0) for s in savings_rows)
         total_ptd_saved = sum(s.get("ptd_doc_tokens_avoided", 0) for s in savings_rows)
-        total_saved     = total_ptc_saved + total_ptd_saved
-        overall_pct     = round(total_saved / total_react * 100, 1) if total_react > 0 else 0.0
-        ptc_pct         = round(total_ptc_saved / total_react * 100, 1) if total_react > 0 else 0.0
-        ptd_pct         = round(total_ptd_saved / total_react * 100, 1) if total_react > 0 else 0.0
+        total_saved = total_ptc_saved + total_ptd_saved
+        overall_pct = round(total_saved / total_react * 100, 1) if total_react > 0 else 0.0
+        ptc_pct = round(total_ptc_saved / total_react * 100, 1) if total_react > 0 else 0.0
+        ptd_pct = round(total_ptd_saved / total_react * 100, 1) if total_react > 0 else 0.0
 
         savings_table = Table(
             title="Token Savings Report — PTC + PTD vs Estimated Traditional ReAct",
@@ -279,8 +314,17 @@ def _render_rich_output(result: dict) -> None:
             "(~200 tokens, paid once). Net saving: ~500 tokens per codegen call."
         )
 
-        _write_savings_markdown(rows_with_savings, pkg_savings_map, total_actual, total_react,
-                                total_ptc_saved, ptc_pct, total_ptd_saved, ptd_pct, overall_pct)
+        _write_savings_markdown(
+            rows_with_savings,
+            pkg_savings_map,
+            total_actual,
+            total_react,
+            total_ptc_saved,
+            ptc_pct,
+            total_ptd_saved,
+            ptd_pct,
+            overall_pct,
+        )
 
 
 async def run(
@@ -297,16 +341,25 @@ async def run(
     requirements_input = req_path.read_text(encoding="utf-8")
     package_specs = parse_requirements_input(requirements_input)
     packages = [str(spec.get("package")) for spec in package_specs]
-    main_lines: list[str] = ["Bootstrapping main agent..."]
+
+    run_id = uuid4().hex[:8]
+    main_lines: list[str] = ["Bootstrapping orchestrator..."]
     completion_counter: list[int] = [0]
     pkg_state: dict[str, dict] = {
-        pkg: {"status": "waiting", "detail": "queued", "logs": ["queued"], "risk_rating": "", "completion_order": 0} for pkg in packages
+        pkg: {
+            "status": "waiting",
+            "detail": "queued",
+            "logs": ["queued"],
+            "risk_rating": "",
+            "completion_order": 0,
+        }
+        for pkg in packages
     }
 
     def _make_progress_display() -> Group:
         import shutil
-        term_width = shutil.get_terminal_size((120, 24)).columns
 
+        term_width = shutil.get_terminal_size((120, 24)).columns
         main_body = "\n".join(main_lines[-6:]) or "[dim]waiting...[/dim]"
         main_panel = Panel(
             main_body,
@@ -315,7 +368,6 @@ async def run(
             width=term_width,
         )
 
-        # Build per-package panels with explicit column width
         cols_per_row = 3
         col_width = max(24, (term_width - cols_per_row + 1) // cols_per_row)
 
@@ -327,34 +379,31 @@ async def run(
             risk = pkg_state[pkg].get("risk_rating", "")
             if st == "done":
                 if risk == "high":
-                    border = "red"
-                    indicator = "✗"
+                    border, indicator = "red", "✗"
                 elif risk == "medium":
-                    border = "yellow"
-                    indicator = "!"
+                    border, indicator = "yellow", "!"
                 else:
-                    border = "green"
-                    indicator = "✓"
+                    border, indicator = "green", "✓"
             elif st == "running":
-                border = "yellow"
-                indicator = "◆"
+                border, indicator = "yellow", "◆"
             elif st == "error":
-                border = "red"
-                indicator = "✗"
+                border, indicator = "red", "✗"
             else:
-                border = "white"
-                indicator = "○"
+                border, indicator = "white", "○"
             if st == "done":
                 risk_color = {"high": "red", "medium": "yellow", "low": "green"}.get(risk, "white")
                 detail_line = f"[bold {risk_color}]{detail[:col_width - 4]}[/bold {risk_color}]"
-                log_lines = "\n".join(f"[dim]{l}[/dim]" for l in logs)
+                log_lines = "\n".join(f"[dim]{ln}[/dim]" for ln in logs)
                 body = f"{log_lines}\n{detail_line}" if log_lines else detail_line
             elif st == "error":
                 detail_line = f"[red]{detail[:col_width - 4]}[/red]"
-                log_lines = "\n".join(f"[dim]{l}[/dim]" for l in logs)
+                log_lines = "\n".join(f"[dim]{ln}[/dim]" for ln in logs)
                 body = f"{log_lines}\n{detail_line}" if log_lines else detail_line
             else:
-                body = "\n".join(f"[dim]{l}[/dim]" for l in logs) + f"\n[yellow]{detail[:col_width - 4]}[/yellow]"
+                body = (
+                    "\n".join(f"[dim]{ln}[/dim]" for ln in logs)
+                    + f"\n[yellow]{detail[:col_width - 4]}[/yellow]"
+                )
             order = pkg_state[pkg].get("completion_order", 0)
             order_tag = f"  [dim]#{order}[/dim]" if order else ""
             pkg_panels.append(
@@ -366,7 +415,6 @@ async def run(
                 )
             )
 
-        # Tile panels into rows using Table.grid with explicit column widths
         grid = Table.grid(padding=(0, 0))
         for _ in range(cols_per_row):
             grid.add_column(width=col_width)
@@ -378,102 +426,57 @@ async def run(
 
         return Group(main_panel, grid)
 
-    async def _on_progress(event: str, payload: dict) -> None:
-        if event == "main_start":
-            main_lines.append(f"Planner parsed {payload.get('total_packages', 0)} package(s)")
-        elif event == "main_bootstrap":
-            msg = payload.get("message", "")
-            label = {
-                "starting_sandbox": "Starting Docker sandbox...",
-                "sandbox_started":  "Sandbox ready",
-                "mcp_connected":    "MCP servers connected",
-            }.get(msg, msg)
-            main_lines.append(label)
-        elif event == "main_ready":
-            servers = ", ".join(payload.get("servers", []))
-            main_lines.append(f"MCP connected once: {servers}")
-            main_lines.append("Main agent dispatched sub-agents")
-        elif event == "subagent_start":
-            pkg = str(payload.get("package"))
-            if pkg in pkg_state:
-                pkg_state[pkg]["status"] = "running"
-                pkg_state[pkg]["detail"] = f"pinned {payload.get('pinned_version')}"
-                pkg_state[pkg]["logs"].append("querying NVD + PyPI + GitHub")
-        elif event == "subagent_update":
-            pkg = str(payload.get("package"))
-            if pkg in pkg_state:
-                stage = str(payload.get("stage", "running"))
-                label = {
-                    "llm_codegen":          "generating audit script",
-                    "script_execution":     "executing in sandbox",
-                    "llm_interpretation":   "interpreting CVEs",
-                    "llm_changelog":        "analysing changelog",
-                    "done":                 "finalising result",
-                }.get(stage, stage.replace("_", " "))
-                pkg_state[pkg]["status"] = "running"
-                pkg_state[pkg]["detail"] = label
-                pkg_state[pkg]["logs"].append(label)
-        elif event == "subagent_complete":
-            pkg = str(payload.get("package"))
-            if pkg in pkg_state:
-                risk = str(payload.get("risk_rating") or "unknown").upper()
-                total = payload.get("total_cves_found", 0)
-                affecting = payload.get("cves_affecting_count", total)
-                completion_counter[0] += 1
-                pkg_state[pkg]["status"] = "done"
-                pkg_state[pkg]["risk_rating"] = str(payload.get("risk_rating") or "").lower()
-                pkg_state[pkg]["completion_order"] = completion_counter[0]
-                pkg_state[pkg]["detail"] = f"risk={risk}  {affecting} affecting / {total} scanned"
-                pkg_state[pkg]["logs"].append("audit complete")
-                main_lines.append(f"✓ {pkg}: {risk} ({affecting} affecting CVEs)")
-        elif event == "subagent_error":
-            pkg = str(payload.get("package"))
-            if pkg in pkg_state:
-                pkg_state[pkg]["status"] = "error"
-                pkg_state[pkg]["detail"] = str(payload.get("error", ""))[:120]
-                pkg_state[pkg]["logs"].append("failed")
-                main_lines.append(f"{pkg} failed; fallback emitted")
-        elif event == "main_disconnecting":
-            main_lines.append("Disconnecting MCP servers...")
-        elif event == "main_stopping_sandbox":
-            main_lines.append("Stopping sandbox...")
-        elif event == "main_synthesizing":
-            main_lines.append("Main agent synthesizing cross-package plan")
-        elif event == "main_complete":
-            main_lines.append("Run complete")
+    graph, sandbox = create_audit_pipeline(config)
+    await asyncio.get_event_loop().run_in_executor(None, sandbox.start)
 
-    if as_json:
-        result = await run_multi_package_audit(
-            requirements_input=requirements_input,
-            config_path=config,
-            use_llm_synthesizer=(model == "openai"),
-        )
-    else:
-        with Live(
-            _make_progress_display(),
-            console=console,
-            refresh_per_second=8,
-            vertical_overflow="visible",
-            transient=False,
-        ) as live:
-            async def _progress_and_refresh(event: str, payload: dict) -> None:
-                await _on_progress(event, payload)
+    package_results: list[dict] = []
+    final_messages = None
+
+    run_config: dict = {"recursion_limit": 50}
+    if _tracer:
+        run_config["callbacks"] = [_tracer]
+
+    try:
+        if as_json:
+            async for event in graph.astream(
+                {"packages": package_specs, "run_id": run_id},
+                config=run_config,
+            ):
+                _update_state_from_event(event, packages, pkg_state, main_lines,
+                                         completion_counter, package_results)
+        else:
+            with Live(
+                _make_progress_display(),
+                console=console,
+                refresh_per_second=8,
+                vertical_overflow="visible",
+                transient=False,
+            ) as live:
+                async for event in graph.astream(
+                    {"packages": package_specs, "run_id": run_id},
+                    config=run_config,
+                ):
+                    _update_state_from_event(
+                        event, packages, pkg_state, main_lines,
+                        completion_counter, package_results,
+                    )
+                    live.update(_make_progress_display())
                 live.update(_make_progress_display())
+    finally:
+        await asyncio.get_event_loop().run_in_executor(None, sandbox.stop)
 
-            result = await run_multi_package_audit(
-                requirements_input=requirements_input,
-                config_path=config,
-                use_llm_synthesizer=(model == "openai"),
-                progress_callback=_progress_and_refresh,
-            )
-            live.update(_make_progress_display())
+    synthesis = await synthesize_results(
+        package_results,
+        use_llm=(model == "openai"),
+        llm_model="gpt-4o-mini",
+    )
+
     output = {
-        "main_agent": result.get("main_agent", {}),
-        "sub_agents": result.get("sub_agents", []),
-        "planner": result.get("planner", {}),
-        "package_results": result.get("package_results", []),
-        "synthesis": result.get("synthesis", {}),
+        "planner": {"packages": package_specs, "total_packages": len(package_specs)},
+        "package_results": package_results,
+        "synthesis": synthesis,
     }
+
     if as_json:
         print(json.dumps(output, indent=2, ensure_ascii=False))
     else:
@@ -481,8 +484,88 @@ async def run(
         if show_llm_narrative:
             narrative = output.get("synthesis", {}).get("llm_narrative")
             if narrative:
-                console.print(Panel(str(narrative), title="Main Agent — LLM Narrative", border_style="cyan"))
+                console.print(
+                    Panel(
+                        str(narrative),
+                        title="Main Agent — LLM Narrative",
+                        border_style="cyan",
+                    )
+                )
     return 0
+
+
+def _update_state_from_event(
+    event: dict,
+    packages: list[str],
+    pkg_state: dict,
+    main_lines: list[str],
+    completion_counter: list[int],
+    package_results: list[dict],
+) -> None:
+    """Map LangGraph stream events to progress state.
+
+    Events are dicts of {node_name: node_output}. We inspect node names and
+    any embedded package data to update the live display.
+    """
+    for node_name, node_output in event.items():
+        if not isinstance(node_output, dict):
+            continue
+
+        # Extract package_results if the final orchestrator state includes them
+        if "package_results" in node_output:
+            for r in node_output["package_results"]:
+                pkg_name = r.get("package") if isinstance(r, dict) else None
+                if pkg_name and not any(
+                    p.get("package") == pkg_name for p in package_results
+                ):
+                    package_results.append(r)
+
+        # Map node names to per-package progress updates
+        node_lower = node_name.lower()
+        for pkg in packages:
+            pkg_lower = pkg.lower()
+            if pkg_lower not in node_lower:
+                continue
+
+            st = pkg_state[pkg]
+            if "start" in node_lower or "audit" in node_lower:
+                st["status"] = "running"
+                st["detail"] = "auditing…"
+                st["logs"].append("agent started")
+            elif "complete" in node_lower or "done" in node_lower:
+                risk = str(node_output.get("risk_rating", "")).lower()
+                total = node_output.get("total_cves_found", 0)
+                completion_counter[0] += 1
+                st["status"] = "done"
+                st["risk_rating"] = risk
+                st["completion_order"] = completion_counter[0]
+                st["detail"] = f"risk={risk.upper()}  {total} CVEs scanned"
+                st["logs"].append("audit complete")
+                main_lines.append(f"✓ {pkg}: {risk.upper()} ({total} CVEs)")
+            elif "error" in node_lower or "fail" in node_lower:
+                err = str(node_output.get("error", ""))[:80]
+                st["status"] = "error"
+                st["detail"] = err or "failed"
+                st["logs"].append("failed")
+                main_lines.append(f"✗ {pkg}: error")
+            else:
+                st["status"] = "running"
+                label = node_name.replace("_", " ").replace("-", " ")
+                st["detail"] = label[:60]
+                st["logs"].append(label[:40])
+
+        # General orchestrator progress messages
+        if "messages" in node_output:
+            msgs = node_output["messages"]
+            if isinstance(msgs, list) and msgs:
+                last = msgs[-1]
+                content = getattr(last, "content", None) or (
+                    last.get("content") if isinstance(last, dict) else None
+                )
+                if content and isinstance(content, str):
+                    snippet = content.strip()[:80]
+                    if snippet:
+                        main_lines.append(snippet)
 
 
 def main() -> int:
