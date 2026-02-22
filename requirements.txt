@@ -1,0 +1,2 @@
+# Single-package test for PTC bridge validation
+requests==2.28.1
