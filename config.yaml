@@ -1,6 +1,6 @@
 docker:
-  image: "ptc-v4-dep-gap:latest"
-  container_name: "ptc-v4-dep-gap-sandbox"
+  image: "dep-audit-deepagent:latest"
+  container_name: "dep-audit-deepagent-sandbox"
   auto_remove: false
   network_mode: "bridge"
 
@@ -24,13 +24,6 @@ mcp:
       args: ["run", "python", "-m", "src.mcp_servers.github_api"]
       env:
         GITHUB_TOKEN: "${GITHUB_TOKEN}"
-      tool_exposure_mode: "summary"
-    - name: "search"
-      description: "Search API server"
-      command: "uv"
-      args: ["run", "python", "-m", "src.mcp_servers.search"]
-      env:
-        TAVILY_API_KEY: "${TAVILY_API_KEY}"
       tool_exposure_mode: "summary"
   tool_discovery_enabled: true
   lazy_load: true
