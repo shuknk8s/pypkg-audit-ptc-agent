@@ -18,7 +18,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
-from src.agent.pipeline import create_audit_pipeline
+from src.agent.pipeline import create_audit_pipeline, _bootstrap_ptd_docs
 from src.agent.planner import parse_requirements_input
 from src.agent.synthesizer import synthesize_results
 
@@ -428,6 +428,9 @@ async def run(
 
     graph, sandbox = create_audit_pipeline(config)
     await asyncio.get_event_loop().run_in_executor(None, sandbox.start)
+    # PTD bootstrap: write tool doc files into agent filesystem now that sandbox is running
+    from src.sandbox.docker_backend import DockerBackend
+    _bootstrap_ptd_docs(DockerBackend(sandbox))
 
     package_results: list[dict] = []
     final_messages = None

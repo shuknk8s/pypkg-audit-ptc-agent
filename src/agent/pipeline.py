@@ -3,6 +3,14 @@
 Creates the top-level LangGraph orchestrator that fans out to per-package
 auditor subagents via SubAgentMiddleware, with SummarizationMiddleware to
 prevent context overflow across large requirement sets.
+
+PTD bootstrap
+-------------
+At startup, the three PTD doc files from src/tools/docs/ are written into the
+agent's filesystem at /audit/docs/. This makes them available for the agent
+to read_file() on demand before each tool's first use, satisfying the PTD
+(Progressive Tool Discovery) constraint without injecting them eagerly into
+the system prompt.
 """
 
 from __future__ import annotations
@@ -15,6 +23,7 @@ from src.agent.subagent import create_package_auditor_subagent
 from src.config.loaders import load_from_file
 from src.sandbox.docker_backend import DockerBackend
 from src.sandbox.docker_sandbox import DockerSandbox
+from src.tools.audit_tools import PTD_DOC_FILES
 
 ORCHESTRATOR_SYSTEM_PROMPT = """
 You are a multi-package dependency security audit orchestrator.
@@ -77,4 +86,32 @@ def create_audit_pipeline(config_path: str = "config.yaml"):
         subagents=[package_auditor_spec],
         system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
     )
+
+    # PTD bootstrap — pre-write tool doc files into the agent filesystem.
+    # Each per-package subagent reads these via read_file("/audit/docs/{tool}_tool.md")
+    # before calling that tool for the first time. This satisfies PTD without
+    # injecting doc content eagerly into the system prompt.
+    _bootstrap_ptd_docs(docker_backend)
+
     return orchestrator, sandbox
+
+
+def _bootstrap_ptd_docs(docker_backend: DockerBackend) -> None:
+    """Write PTD tool documentation files into the agent filesystem.
+
+    Files are written to /audit/docs/ in the DockerBackend filesystem so the
+    per-package auditor subagent can read_file() them on demand.
+
+    This is a no-op if the sandbox is not yet started — bootstrap is called
+    after sandbox.start() in audit.py.
+    """
+    for filename, local_path in PTD_DOC_FILES.items():
+        if not local_path.exists():
+            continue
+        try:
+            content = local_path.read_text(encoding="utf-8")
+            docker_backend.write(f"/audit/docs/{filename}", content)
+        except Exception:
+            # Sandbox may not be running yet at construction time;
+            # audit.py calls _bootstrap_ptd_docs() again after sandbox.start()
+            pass
