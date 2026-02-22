@@ -1,87 +1,150 @@
-"""Audit pipeline: orchestrator graph + sandbox lifecycle.
+"""Audit pipeline — single shared Docker container, all packages in parallel.
 
-Creates the top-level LangGraph orchestrator that fans out to per-package
-auditor subagents via SubAgentMiddleware, with SummarizationMiddleware to
-prevent context overflow across large requirement sets.
-
-PTD bootstrap
--------------
-At startup, the three PTD doc files from src/tools/docs/ are written into the
-agent's filesystem at /audit/docs/. This makes them available for the agent
-to read_file() on demand before each tool's first use, satisfying the PTD
-(Progressive Tool Discovery) constraint without injecting them eagerly into
-the system prompt.
+Identical approach to ptc-v4-dep-gap-agentic:
+  - One DockerSandbox started once, stopped once
+  - Tools uploaded once
+  - All packages run concurrently via asyncio.gather() sharing the same sandbox
+  - Each package writes to its own script path: /app/code/phase2_<pkg>.py
 """
-
 from __future__ import annotations
 
-from deepagents import create_deep_agent
-from deepagents.backends.state import StateBackend
-from deepagents.middleware.subagents import CompiledSubAgent
+import asyncio
+from collections.abc import Awaitable, Callable
+from uuid import uuid4
 
-from src.agent.subagent import create_package_auditor_subagent
+import structlog
+
+from src.agent.events import AuditEvent, EventBus
+from src.agent.executor import _container_server_configs, _mcp_server_uploads
+from src.agent.schema import validate_phase3_result
+from src.agent.subagent import run_package_subagent
+from src.agent.tool_catalog import build_tool_catalog_summary
 from src.config.loaders import load_from_file
+from src.core.mcp_registry import MCPRegistry
+from src.core.tool_generator import ToolGenerator
 from src.sandbox.docker_sandbox import DockerSandbox
 
-ORCHESTRATOR_SYSTEM_PROMPT = """
-You are a multi-package dependency security audit orchestrator.
-You receive a list of Python packages with their pinned versions in your first message.
+logger = structlog.get_logger()
 
-Steps:
-1. Parse the package list from the user message (format: pkg==version, one per line).
-2. Use write_todos to plan the audit — one todo per package.
-3. For each package, call task("Audit package <pkg>==<version>. Return ONLY a compact JSON object (no markdown, no prose) with these exact keys: package, pinned_version, latest_version, versions_behind, total_cves_found, cves_affecting_pinned, cves_not_relevant, changelog_analysis, breaking_changes_detected, risk_rating (low|medium|high), upgrade_recommendation, recommendation_rationale.", "package-auditor")
-   Call as many tasks in PARALLEL as possible.
-4. Each task() call returns the subagent's compact JSON for that package.
-   Parse each result and add to your package_results list.
-5. After all tasks complete, return a final JSON message with exactly these keys:
-   {
-     "package_results": [ <list of per-package audit dicts from step 4> ],
-     "synthesis": {
-       "prioritized_packages": [ <sorted by risk descending, each item has: rank, package, risk_rating, total_cves_found, versions_behind, upgrade_recommendation> ],
-       "detailed_summary": "<one paragraph cross-package summary>"
-     }
-   }
-
-IMPORTANT: Your final message MUST be valid JSON only. No markdown code fences, no prose.
-""".strip()
+ProgressCallback = Callable[[str, dict], Awaitable[None] | None]
 
 
-def create_audit_pipeline(config_path: str = "config.yaml"):
-    """Build the orchestrator graph.
+async def _emit(cb: ProgressCallback | None, event: str, payload: dict,
+                bus: EventBus | None = None) -> None:
+    if cb is not None:
+        maybe = cb(event, payload)
+        if asyncio.iscoroutine(maybe):
+            await maybe
+    if bus is not None:
+        await bus.emit(AuditEvent(
+            event_type=event,
+            package=payload.get("package", ""),
+            data=payload,
+        ))
 
-    The orchestrator uses StateBackend so all read_file/write_file calls operate
-    on the LangGraph state 'files' channel. This ensures:
-    - PTD docs pre-loaded in the initial input state are readable by both orchestrator
-      and per-package subagents (deepagents copies parent state to child on task()).
-    - Results written by subagents propagate back to the orchestrator state.
 
-    Note: create_deep_agent adds SubAgentMiddleware and SummarizationMiddleware
-    internally when subagents are provided; do not pass them explicitly.
-
-    Args:
-        config_path: Path to config.yaml (default: "config.yaml").
-
-    Returns:
-        Tuple of (orchestrator_graph, sandbox). sandbox is kept for DockerSandbox
-        lifecycle management but is no longer used for agent file operations.
-    """
+async def run_all_packages(
+    packages: list[tuple[str, str]],
+    config_path: str = "config.yaml",
+    progress_callback: ProgressCallback | None = None,
+    event_bus: EventBus | None = None,
+) -> list[dict]:
     config = load_from_file(config_path)
-    sandbox = DockerSandbox(image=config.docker.image)
+    package_specs = [{"package": p, "pinned_version": v} for p, v in packages]
 
-    package_auditor_graph = create_package_auditor_subagent()
+    await _emit(progress_callback, "main_start", {
+        "total_packages": len(package_specs),
+        "packages": package_specs,
+    }, bus=event_bus)
+    await _emit(progress_callback, "main_bootstrap", {"message": "starting_sandbox"}, bus=event_bus)
 
-    package_auditor_spec: CompiledSubAgent = {
-        "name": "package-auditor",
-        "description": "Audits a single Python package for CVEs and changelog breaking changes. Returns compact JSON.",
-        "runnable": package_auditor_graph,
-    }
-
-    orchestrator = create_deep_agent(
-        model="gpt-4o",
-        backend=lambda runtime: StateBackend(runtime),
-        subagents=[package_auditor_spec],
-        system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
+    # One container for all packages — same as ptc-v4-dep-gap-agentic
+    container_name = f"{config.docker.container_name}-{uuid4().hex[:8]}"
+    sandbox = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: DockerSandbox(config.docker.image, container_name)
     )
+    await _emit(progress_callback, "main_bootstrap", {"message": "sandbox_started"}, bus=event_bus)
 
-    return orchestrator, sandbox
+    registry = MCPRegistry(config.mcp.servers)
+    await registry.connect_all()
+    await _emit(progress_callback, "main_bootstrap", {"message": "mcp_connected"}, bus=event_bus)
+
+    try:
+        tools_by_server = registry.get_tools_by_server()
+        server_configs = _container_server_configs(config.mcp.servers)
+        mcp_uploads = _mcp_server_uploads(config.mcp.servers)
+        generator = ToolGenerator()
+
+        # Upload tools once into the shared container
+        generated = generator.generate_all(tools_by_server, server_configs)
+        tool_uploads = [
+            (f"/app/tools/{name}", content.encode("utf-8"))
+            for name, content in generated.items()
+        ]
+        await sandbox.aupload_files(tool_uploads + mcp_uploads)
+
+        tool_catalog_summary = build_tool_catalog_summary(tools_by_server)
+
+        await _emit(progress_callback, "main_ready", {
+            "servers": [s.name for s in config.mcp.servers],
+            "packages": package_specs,
+        }, bus=event_bus)
+
+        async def _run_one(spec: dict) -> dict:
+            package = str(spec["package"])
+            pinned = str(spec["pinned_version"])
+            await _emit(progress_callback, "subagent_start", {
+                "package": package, "pinned_version": pinned,
+            }, bus=event_bus)
+            try:
+                result = await run_package_subagent(
+                    package=package,
+                    pinned_version=pinned,
+                    sandbox=sandbox,
+                    tool_catalog_summary=tool_catalog_summary,
+                    llm_config=config.llm,
+                    progress_callback=progress_callback,
+                    event_bus=event_bus,
+                )
+                await _emit(progress_callback, "subagent_complete", {
+                    "package": package,
+                    "risk_rating": result.get("risk_rating"),
+                    "total_cves_found": result.get("total_cves_found"),
+                    "cves_affecting_count": len(result.get("cves_affecting_pinned") or []),
+                }, bus=event_bus)
+                return result
+            except Exception as exc:
+                await _emit(progress_callback, "subagent_error", {
+                    "package": package, "error": str(exc),
+                }, bus=event_bus)
+                return validate_phase3_result({
+                    "package": package,
+                    "pinned_version": pinned,
+                    "latest_version": None,
+                    "versions_behind": 0,
+                    "cves_affecting_pinned": [],
+                    "cves_not_relevant": [],
+                    "needs_interpretation": [],
+                    "total_cves_found": 0,
+                    "changelog_analysis": f"Fallback due to error: {exc}",
+                    "changelog_excerpts": [],
+                    "upgrade_recommendation": "Retry after infrastructure stabilizes.",
+                    "risk_rating": "low",
+                    "changelog": {"notes": []},
+                    "breaking_changes_detected": False,
+                    "recommendation_rationale": "Deterministic fallback.",
+                }).model_dump()
+
+        tasks = [_run_one(spec) for spec in package_specs]
+        package_results = list(await asyncio.gather(*tasks))
+
+    finally:
+        await _emit(progress_callback, "main_disconnecting", {}, bus=event_bus)
+        await registry.disconnect_all()
+        await _emit(progress_callback, "main_stopping_sandbox", {}, bus=event_bus)
+        await asyncio.get_event_loop().run_in_executor(None, sandbox.stop)
+
+    await _emit(progress_callback, "main_synthesizing", {}, bus=event_bus)
+    await _emit(progress_callback, "main_complete", {}, bus=event_bus)
+
+    return package_results

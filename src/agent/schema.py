@@ -1,7 +1,31 @@
-import operator
-from typing import Annotated, Literal, TypedDict
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
+
+if TYPE_CHECKING:
+    from langchain_core.language_models import BaseChatModel
+    from src.sandbox.docker_sandbox import DockerSandbox
+
+
+@dataclass
+class AuditContext:
+    """Mutable context bag threaded through the step_* functions in subagent.py."""
+    package: str
+    pinned_version: str
+    llm: "BaseChatModel"
+    sandbox: "DockerSandbox"
+    tool_catalog_summary: str
+    messages: list = field(default_factory=list)
+    script_source: str = ""
+    parsed_output: dict | None = None
+    last_error: str = ""
+    attempt: int = 0
+    phase2_data: dict = field(default_factory=dict)
+    token_usage: dict = field(default_factory=lambda: {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+    token_savings: dict = field(default_factory=dict)
+    supplemental_calls: int = 0
+    servers_used: set = field(default_factory=set)
 
 
 class CVEEntry(BaseModel):
@@ -49,20 +73,3 @@ def validate_phase3_result(data: dict) -> Phase3Result:
         raise ValueError(f"Invalid phase 3 result: {exc}") from exc
 
 
-class CVEFinding(BaseModel):
-    """Structured CVE finding produced by the cve-interpreter subagent."""
-
-    cve_id: str
-    severity: str = "unknown"
-    status: str
-    determination_method: str = "cpe_range"
-    description: str = ""
-
-
-class AuditState(TypedDict):
-    """LangGraph state schema for the top-level audit orchestrator graph."""
-
-    packages: list[dict]
-    package_results: Annotated[list, operator.add]
-    synthesis: dict
-    run_id: str

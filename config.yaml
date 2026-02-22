@@ -25,6 +25,36 @@ mcp:
       env:
         GITHUB_TOKEN: "${GITHUB_TOKEN}"
       tool_exposure_mode: "summary"
+    - name: "epss"
+      description: "FIRST EPSS exploit probability scores"
+      command: "uv"
+      args: ["run", "python", "-m", "src.mcp_servers.epss"]
+      env: {}
+      tool_exposure_mode: "summary"
+    - name: "osv"
+      description: "OSV vulnerability database"
+      command: "uv"
+      args: ["run", "python", "-m", "src.mcp_servers.osv"]
+      env: {}
+      tool_exposure_mode: "summary"
+    - name: "deps_dev"
+      description: "deps.dev dependency and advisory info"
+      command: "uv"
+      args: ["run", "python", "-m", "src.mcp_servers.deps_dev"]
+      env: {}
+      tool_exposure_mode: "summary"
+    - name: "license_check"
+      description: "PyPI license checker"
+      command: "uv"
+      args: ["run", "python", "-m", "src.mcp_servers.license_check"]
+      env: {}
+      tool_exposure_mode: "summary"
+    - name: "scorecard"
+      description: "OpenSSF Security Scorecard"
+      command: "uv"
+      args: ["run", "python", "-m", "src.mcp_servers.scorecard"]
+      env: {}
+      tool_exposure_mode: "summary"
   tool_discovery_enabled: true
   lazy_load: true
   tool_exposure_mode: "summary"
@@ -32,10 +62,3 @@ mcp:
 runtime:
   max_run_seconds: 240
   quality_report_enabled: true
-
-llm:
-  model: "gpt-4o-mini"
-  temperature: 0.0
-  max_tokens: 4096
-  seed: 42
-  top_p: 1.0

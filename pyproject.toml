@@ -5,8 +5,6 @@ description = "Python dependency security auditor using LangChain Deep Agents â€
 requires-python = ">=3.12"
 dependencies = [
     "deepagents>=0.4.0",
-    "langgraph>=0.2.0",
-    "langchain-core>=0.3.0",
     "langchain-openai>=1.1.10",
     "structlog>=24.0.0",
     "rich>=14.3.3",

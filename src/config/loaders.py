@@ -7,8 +7,8 @@ from src.config.core import CoreConfig
 
 DEFAULT_CONFIG = {
     "docker": {
-        "image": "ptc-v4-dep-gap:latest",
-        "container_name": "ptc-v4-dep-gap-sandbox",
+        "image": "dep-audit-deepagent:latest",
+        "container_name": "dep-audit-deepagent-sandbox",
         "auto_remove": False,
         "network_mode": "bridge",
     },
@@ -38,14 +38,6 @@ DEFAULT_CONFIG = {
                 "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"},
                 "tool_exposure_mode": "summary",
             },
-            {
-                "name": "search",
-                "description": "Search API server",
-                "command": "uv",
-                "args": ["run", "python", "-m", "src.mcp_servers.search"],
-                "env": {"TAVILY_API_KEY": "${TAVILY_API_KEY}"},
-                "tool_exposure_mode": "summary",
-            },
         ],
         "tool_discovery_enabled": True,
         "lazy_load": True,
@@ -54,13 +46,6 @@ DEFAULT_CONFIG = {
     "runtime": {
         "max_run_seconds": 240,
         "quality_report_enabled": True,
-    },
-    "llm": {
-        "model": "gpt-4o-mini",
-        "temperature": 0.0,
-        "max_tokens": 4096,
-        "seed": 42,
-        "top_p": 1.0,
     },
 }
 

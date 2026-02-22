@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-gap audit entrypoint — LangGraph astream edition."""
+"""Dependency-gap audit entrypoint — parallel DeepAgents edition."""
 from __future__ import annotations
 
 import argparse
@@ -9,7 +9,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
+from uuid import uuid4  # noqa: F401 — kept for _write_savings_markdown
 
 import structlog
 from rich import box
@@ -18,14 +18,9 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
-from langchain_core.messages import HumanMessage
-
-from deepagents.middleware.filesystem import FileData
-
-from src.agent.pipeline import create_audit_pipeline
+from src.agent.pipeline import run_all_packages
 from src.agent.planner import parse_requirements_input
 from src.agent.synthesizer import synthesize_results
-from src.tools.audit_tools import PTD_DOC_FILES
 
 structlog.configure(
     processors=[
@@ -346,156 +341,144 @@ async def run(
     requirements_input = req_path.read_text(encoding="utf-8")
     package_specs = parse_requirements_input(requirements_input)
     packages = [str(spec.get("package")) for spec in package_specs]
+    package_pairs = [(str(s["package"]), str(s["pinned_version"])) for s in package_specs]
 
-    run_id = uuid4().hex[:8]
-    main_lines: list[str] = ["Bootstrapping orchestrator..."]
+    main_lines: list[str] = ["Bootstrapping main agent..."]
     completion_counter: list[int] = [0]
     pkg_state: dict[str, dict] = {
-        pkg: {
-            "status": "waiting",
-            "detail": "queued",
-            "logs": ["queued"],
-            "risk_rating": "",
-            "completion_order": 0,
-        }
+        pkg: {"status": "waiting", "detail": "queued", "logs": ["queued"], "risk_rating": "", "completion_order": 0}
         for pkg in packages
     }
 
-    def _make_progress_display() -> Group:
+    def _make_display() -> Group:
         import shutil
-
         term_width = shutil.get_terminal_size((120, 24)).columns
-        main_body = "\n".join(main_lines[-6:]) or "[dim]waiting...[/dim]"
         main_panel = Panel(
-            main_body,
+            "\n".join(main_lines[-6:]) or "[dim]waiting...[/dim]",
             title="[bold cyan]◆ main[/bold cyan]",
             border_style="cyan",
             width=term_width,
         )
-
-        cols_per_row = 3
-        col_width = max(24, (term_width - cols_per_row + 1) // cols_per_row)
-
-        pkg_panels = []
+        cols = 3
+        col_w = max(24, (term_width - cols + 1) // cols)
+        panels = []
         for pkg in packages:
-            st = pkg_state[pkg]["status"]
-            detail = pkg_state[pkg]["detail"]
-            logs = pkg_state[pkg]["logs"][-3:]
-            risk = pkg_state[pkg].get("risk_rating", "")
-            if st == "done":
-                if risk == "high":
-                    border, indicator = "red", "✗"
-                elif risk == "medium":
-                    border, indicator = "yellow", "!"
-                else:
-                    border, indicator = "green", "✓"
-            elif st == "running":
-                border, indicator = "yellow", "◆"
-            elif st == "error":
-                border, indicator = "red", "✗"
+            st = pkg_state[pkg]
+            status = st["status"]
+            risk = st.get("risk_rating", "")
+            if status == "done":
+                border = {"high": "red", "medium": "yellow"}.get(risk, "green")
+                ind = "✗" if risk == "high" else ("!" if risk == "medium" else "✓")
+            elif status == "running":
+                border, ind = "yellow", "◆"
+            elif status == "error":
+                border, ind = "red", "✗"
             else:
-                border, indicator = "white", "○"
-            if st == "done":
-                risk_color = {"high": "red", "medium": "yellow", "low": "green"}.get(risk, "white")
-                detail_line = f"[bold {risk_color}]{detail[:col_width - 4]}[/bold {risk_color}]"
-                log_lines = "\n".join(f"[dim]{ln}[/dim]" for ln in logs)
-                body = f"{log_lines}\n{detail_line}" if log_lines else detail_line
-            elif st == "error":
-                detail_line = f"[red]{detail[:col_width - 4]}[/red]"
-                log_lines = "\n".join(f"[dim]{ln}[/dim]" for ln in logs)
-                body = f"{log_lines}\n{detail_line}" if log_lines else detail_line
+                border, ind = "white", "○"
+            logs = "\n".join(f"[dim]{l}[/dim]" for l in st["logs"][-3:])
+            detail = st["detail"]
+            if status == "done":
+                rc = {"high": "red", "medium": "yellow", "low": "green"}.get(risk, "white")
+                body = f"{logs}\n[bold {rc}]{detail[:col_w-4]}[/bold {rc}]"
+            elif status == "error":
+                body = f"{logs}\n[red]{detail[:col_w-4]}[/red]"
             else:
-                body = (
-                    "\n".join(f"[dim]{ln}[/dim]" for ln in logs)
-                    + f"\n[yellow]{detail[:col_width - 4]}[/yellow]"
-                )
-            order = pkg_state[pkg].get("completion_order", 0)
+                body = f"{logs}\n[yellow]{detail[:col_w-4]}[/yellow]"
+            order = st.get("completion_order", 0)
             order_tag = f"  [dim]#{order}[/dim]" if order else ""
-            pkg_panels.append(
-                Panel(
-                    body,
-                    title=f"[bold {border}]{indicator} {pkg}[/bold {border}]{order_tag}",
-                    border_style=border,
-                    width=col_width,
-                )
-            )
-
+            panels.append(Panel(body, title=f"[bold {border}]{ind} {pkg}[/bold {border}]{order_tag}", border_style=border, width=col_w))
         grid = Table.grid(padding=(0, 0))
-        for _ in range(cols_per_row):
-            grid.add_column(width=col_width)
-        for i in range(0, len(pkg_panels), cols_per_row):
-            row = list(pkg_panels[i : i + cols_per_row])
-            while len(row) < cols_per_row:
+        for _ in range(cols):
+            grid.add_column(width=col_w)
+        for i in range(0, len(panels), cols):
+            row = list(panels[i: i + cols])
+            while len(row) < cols:
                 row.append("")
             grid.add_row(*row)
-
         return Group(main_panel, grid)
 
-    graph, sandbox = create_audit_pipeline(config)
+    async def _on_progress(event: str, payload: dict) -> None:
+        if event == "main_start":
+            main_lines.append(f"Planner parsed {payload.get('total_packages', 0)} package(s)")
+        elif event == "main_bootstrap":
+            msg = payload.get("message", "")
+            main_lines.append({
+                "starting_sandbox": "Starting sandbox container...",
+                "sandbox_started": "Sandbox ready",
+                "mcp_connecting": "Connecting MCP servers...",
+                "mcp_connected": "MCP servers connected",
+            }.get(msg, msg))
+        elif event == "main_ready":
+            servers = ", ".join(payload.get("servers", []))
+            main_lines.append(f"MCP connected once: {servers}")
+            main_lines.append("Main agent dispatched sub-agents")
+        elif event == "subagent_start":
+            pkg = str(payload.get("package"))
+            if pkg in pkg_state:
+                pkg_state[pkg]["status"] = "running"
+                pkg_state[pkg]["detail"] = f"pinned {payload.get('pinned_version')}"
+                pkg_state[pkg]["logs"].append("querying NVD + PyPI + GitHub")
+        elif event == "subagent_update":
+            pkg = str(payload.get("package"))
+            if pkg in pkg_state:
+                stage = str(payload.get("stage", "running"))
+                label = {
+                    "llm_codegen":        "generating audit script",
+                    "script_execution":   "executing in sandbox",
+                    "llm_interpretation": "interpreting CVEs",
+                    "llm_changelog":      "analysing changelog",
+                    "done":               "finalising result",
+                }.get(stage, stage.replace("_", " "))
+                pkg_state[pkg]["status"] = "running"
+                pkg_state[pkg]["detail"] = label
+                pkg_state[pkg]["logs"].append(label)
+        elif event == "subagent_complete":
+            pkg = str(payload.get("package"))
+            if pkg in pkg_state:
+                risk = str(payload.get("risk_rating") or "unknown").lower()
+                total = payload.get("total_cves_found", 0)
+                affecting = payload.get("cves_affecting_count", total)
+                completion_counter[0] += 1
+                pkg_state[pkg]["status"] = "done"
+                pkg_state[pkg]["risk_rating"] = risk
+                pkg_state[pkg]["completion_order"] = completion_counter[0]
+                pkg_state[pkg]["detail"] = f"risk={risk.upper()}  {affecting} affecting / {total} scanned"
+                pkg_state[pkg]["logs"].append("audit complete")
+                main_lines.append(f"✓ {pkg}: {risk.upper()} ({affecting} affecting CVEs)")
+        elif event == "subagent_error":
+            pkg = str(payload.get("package"))
+            if pkg in pkg_state:
+                pkg_state[pkg]["status"] = "error"
+                pkg_state[pkg]["detail"] = str(payload.get("error", ""))[:80]
+                pkg_state[pkg]["logs"].append("failed")
+                main_lines.append(f"✗ {pkg}: error — fallback used")
+        elif event == "main_disconnecting":
+            main_lines.append("Disconnecting MCP servers...")
+        elif event == "main_stopping_sandbox":
+            main_lines.append("Stopping sandbox...")
+        elif event == "main_synthesizing":
+            main_lines.append("Main agent synthesizing cross-package plan")
+        elif event == "main_complete":
+            main_lines.append("Run complete")
 
-    # PTD bootstrap: pre-load tool doc files into the LangGraph state 'files' channel.
-    # deepagents copies parent state to subagents on task(), so all per-package
-    # subagents will find these files via read_file("/audit/docs/{tool}_tool.md").
-    from datetime import datetime, timezone as _tz
-    _ts = datetime.now(_tz.utc).isoformat()
-    ptd_files: dict[str, FileData] = {}
-    for filename, local_path in PTD_DOC_FILES.items():
-        if local_path.exists():
-            ptd_files[f"/audit/docs/{filename}"] = FileData(
-                content=local_path.read_text(encoding="utf-8").splitlines(),
-                created_at=_ts,
-                modified_at=_ts,
-            )
+    if as_json:
+        package_results = await run_all_packages(package_pairs, config)
+    else:
+        with Live(_make_display(), console=console, refresh_per_second=8,
+                  vertical_overflow="visible", transient=False) as live:
+            async def _cb(event: str, payload: dict) -> None:
+                await _on_progress(event, payload)
+                live.update(_make_display())
 
-    # Build the package list as a plain-text HumanMessage so the orchestrator can parse it.
-    pkg_list_lines = [f"{s['package']}=={s['pinned_version']}" for s in package_specs]
-    pkg_list_text = "\n".join(pkg_list_lines)
-    initial_input: dict = {
-        "messages": [HumanMessage(content=f"Audit these Python packages:\n\n{pkg_list_text}")],
-        "files": ptd_files,
-    }
+            package_results = await run_all_packages(package_pairs, config, progress_callback=_cb)
+            live.update(_make_display())
 
-    package_results: list[dict] = []
-
-    run_config: dict = {"recursion_limit": 100}
-    if _tracer:
-        run_config["callbacks"] = [_tracer]
-
-    try:
-        if as_json:
-            async for event in graph.astream(initial_input, config=run_config):
-                _update_state_from_event(event, packages, pkg_state, main_lines,
-                                         completion_counter, package_results)
-        else:
-            with Live(
-                _make_progress_display(),
-                console=console,
-                refresh_per_second=8,
-                vertical_overflow="visible",
-                transient=False,
-            ) as live:
-                async for event in graph.astream(initial_input, config=run_config):
-                    _update_state_from_event(
-                        event, packages, pkg_state, main_lines,
-                        completion_counter, package_results,
-                    )
-                    live.update(_make_progress_display())
-                live.update(_make_progress_display())
-    finally:
-        pass  # no sandbox lifecycle needed (tools call MCP servers directly)
-
-    synthesis = await synthesize_results(
-        package_results,
-        use_llm=(model == "openai"),
-        llm_model="gpt-4o-mini",
-    )
-
+    synthesis = await synthesize_results(package_results, use_llm=False)
     output = {
         "planner": {"packages": package_specs, "total_packages": len(package_specs)},
         "package_results": package_results,
         "synthesis": synthesis,
     }
-
     if as_json:
         print(json.dumps(output, indent=2, ensure_ascii=False))
     else:
@@ -503,118 +486,9 @@ async def run(
         if show_llm_narrative:
             narrative = output.get("synthesis", {}).get("llm_narrative")
             if narrative:
-                console.print(
-                    Panel(
-                        str(narrative),
-                        title="Main Agent — LLM Narrative",
-                        border_style="cyan",
-                    )
-                )
+                console.print(Panel(str(narrative), title="Main Agent — LLM Narrative", border_style="cyan"))
     return 0
 
-
-def _update_state_from_event(
-    event: dict,
-    packages: list[str],
-    pkg_state: dict,
-    main_lines: list[str],
-    completion_counter: list[int],
-    package_results: list[dict],
-) -> None:
-    """Map LangGraph stream events to progress state.
-
-    Events are dicts of {node_name: node_output}. We inspect node names and
-    any embedded package data to update the live display.
-    """
-    for node_name, node_output in event.items():
-        if not isinstance(node_output, dict):
-            continue
-
-        # Extract package_results if the final orchestrator state includes them
-        if "package_results" in node_output:
-            for r in node_output["package_results"]:
-                pkg_name = r.get("package") if isinstance(r, dict) else None
-                if pkg_name and not any(
-                    p.get("package") == pkg_name for p in package_results
-                ):
-                    package_results.append(r)
-
-        # Map node names to per-package progress updates
-        node_lower = node_name.lower()
-        for pkg in packages:
-            pkg_lower = pkg.lower()
-            if pkg_lower not in node_lower:
-                continue
-
-            st = pkg_state[pkg]
-            if "start" in node_lower or "audit" in node_lower:
-                st["status"] = "running"
-                st["detail"] = "auditing…"
-                st["logs"].append("agent started")
-            elif "complete" in node_lower or "done" in node_lower:
-                risk = str(node_output.get("risk_rating", "")).lower()
-                total = node_output.get("total_cves_found", 0)
-                completion_counter[0] += 1
-                st["status"] = "done"
-                st["risk_rating"] = risk
-                st["completion_order"] = completion_counter[0]
-                st["detail"] = f"risk={risk.upper()}  {total} CVEs scanned"
-                st["logs"].append("audit complete")
-                main_lines.append(f"✓ {pkg}: {risk.upper()} ({total} CVEs)")
-            elif "error" in node_lower or "fail" in node_lower:
-                err = str(node_output.get("error", ""))[:80]
-                st["status"] = "error"
-                st["detail"] = err or "failed"
-                st["logs"].append("failed")
-                main_lines.append(f"✗ {pkg}: error")
-            else:
-                st["status"] = "running"
-                label = node_name.replace("_", " ").replace("-", " ")
-                st["detail"] = label[:60]
-                st["logs"].append(label[:40])
-
-        # General orchestrator progress messages; also try to parse final JSON
-        if "messages" in node_output:
-            msgs = node_output["messages"]
-            if isinstance(msgs, list) and msgs:
-                last = msgs[-1]
-                content = getattr(last, "content", None) or (
-                    last.get("content") if isinstance(last, dict) else None
-                )
-                if content and isinstance(content, str):
-                    snippet = content.strip()[:80]
-                    if snippet:
-                        main_lines.append(snippet)
-                    # Try to parse final orchestrator JSON (package_results + synthesis)
-                    raw = content.strip()
-                    # Strip markdown code fences if present
-                    if raw.startswith("```"):
-                        raw = "\n".join(
-                            ln for ln in raw.splitlines()
-                            if not ln.startswith("```")
-                        ).strip()
-                    if raw.startswith("{") and "package_results" in raw:
-                        try:
-                            parsed = json.loads(raw)
-                            for r in parsed.get("package_results", []):
-                                pkg_name = r.get("package") if isinstance(r, dict) else None
-                                if pkg_name and not any(
-                                    p.get("package") == pkg_name for p in package_results
-                                ):
-                                    package_results.append(r)
-                                    risk = str(r.get("risk_rating", "")).lower()
-                                    if pkg_name in pkg_state:
-                                        completion_counter[0] += 1
-                                        st = pkg_state[pkg_name]
-                                        st["status"] = "done"
-                                        st["risk_rating"] = risk
-                                        st["completion_order"] = completion_counter[0]
-                                        total_cves = r.get("total_cves_found", 0)
-                                        st["detail"] = f"risk={risk.upper()}  {total_cves} CVEs"
-                                        st["logs"].append("audit complete")
-                                        main_lines.append(f"✓ {pkg_name}: {risk.upper()}")
-                        except (json.JSONDecodeError, KeyError):
-                            pass
 
 
 def main() -> int:
