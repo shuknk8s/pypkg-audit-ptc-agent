@@ -7,10 +7,9 @@ prevent context overflow across large requirement sets.
 
 from __future__ import annotations
 
-from deepagents import SubAgent, create_deep_agent
+from deepagents import create_deep_agent
 from deepagents.backends.filesystem import FilesystemBackend
-from deepagents.middleware.subagents import CompiledSubAgent, SubAgentMiddleware
-from deepagents.middleware.summarization import SummarizationMiddleware
+from deepagents.middleware.subagents import CompiledSubAgent
 
 from src.agent.subagent import create_package_auditor_subagent
 from src.config.loaders import load_from_file

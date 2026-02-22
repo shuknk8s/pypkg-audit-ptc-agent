@@ -1,7 +1,7 @@
 import operator
 from typing import Annotated, Literal, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 
 class CVEEntry(BaseModel):

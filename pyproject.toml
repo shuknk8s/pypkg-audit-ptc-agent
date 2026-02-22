@@ -4,17 +4,18 @@ version = "0.1.0"
 description = "Python dependency security auditor using LangChain Deep Agents — PTC/PTD token-efficient multi-agent architecture"
 requires-python = ">=3.12"
 dependencies = [
-    "docker>=7.0.0",
     "deepagents>=0.4.0",
     "langgraph>=0.2.0",
     "langchain-core>=0.3.0",
     "langchain-openai>=1.1.10",
+    "structlog>=24.0.0",
+    "rich>=14.3.3",
+    "docker>=7.0.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.0",
-    "structlog>=24.0.0",
     "httpx>=0.28.1",
-    "rich>=14.3.3",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
