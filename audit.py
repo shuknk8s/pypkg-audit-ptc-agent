@@ -18,9 +18,14 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
-from src.agent.pipeline import create_audit_pipeline, _bootstrap_ptd_docs
+from langchain_core.messages import HumanMessage
+
+from deepagents.middleware.filesystem import FileData
+
+from src.agent.pipeline import create_audit_pipeline
 from src.agent.planner import parse_requirements_input
 from src.agent.synthesizer import synthesize_results
+from src.tools.audit_tools import PTD_DOC_FILES
 
 structlog.configure(
     processors=[
@@ -427,24 +432,38 @@ async def run(
         return Group(main_panel, grid)
 
     graph, sandbox = create_audit_pipeline(config)
-    await asyncio.get_event_loop().run_in_executor(None, sandbox.start)
-    # PTD bootstrap: write tool doc files into agent filesystem now that sandbox is running
-    from src.sandbox.docker_backend import DockerBackend
-    _bootstrap_ptd_docs(DockerBackend(sandbox))
+
+    # PTD bootstrap: pre-load tool doc files into the LangGraph state 'files' channel.
+    # deepagents copies parent state to subagents on task(), so all per-package
+    # subagents will find these files via read_file("/audit/docs/{tool}_tool.md").
+    from datetime import datetime, timezone as _tz
+    _ts = datetime.now(_tz.utc).isoformat()
+    ptd_files: dict[str, FileData] = {}
+    for filename, local_path in PTD_DOC_FILES.items():
+        if local_path.exists():
+            ptd_files[f"/audit/docs/{filename}"] = FileData(
+                content=local_path.read_text(encoding="utf-8").splitlines(),
+                created_at=_ts,
+                modified_at=_ts,
+            )
+
+    # Build the package list as a plain-text HumanMessage so the orchestrator can parse it.
+    pkg_list_lines = [f"{s['package']}=={s['pinned_version']}" for s in package_specs]
+    pkg_list_text = "\n".join(pkg_list_lines)
+    initial_input: dict = {
+        "messages": [HumanMessage(content=f"Audit these Python packages:\n\n{pkg_list_text}")],
+        "files": ptd_files,
+    }
 
     package_results: list[dict] = []
-    final_messages = None
 
-    run_config: dict = {"recursion_limit": 50}
+    run_config: dict = {"recursion_limit": 100}
     if _tracer:
         run_config["callbacks"] = [_tracer]
 
     try:
         if as_json:
-            async for event in graph.astream(
-                {"packages": package_specs, "run_id": run_id},
-                config=run_config,
-            ):
+            async for event in graph.astream(initial_input, config=run_config):
                 _update_state_from_event(event, packages, pkg_state, main_lines,
                                          completion_counter, package_results)
         else:
@@ -455,10 +474,7 @@ async def run(
                 vertical_overflow="visible",
                 transient=False,
             ) as live:
-                async for event in graph.astream(
-                    {"packages": package_specs, "run_id": run_id},
-                    config=run_config,
-                ):
+                async for event in graph.astream(initial_input, config=run_config):
                     _update_state_from_event(
                         event, packages, pkg_state, main_lines,
                         completion_counter, package_results,
@@ -466,7 +482,7 @@ async def run(
                     live.update(_make_progress_display())
                 live.update(_make_progress_display())
     finally:
-        await asyncio.get_event_loop().run_in_executor(None, sandbox.stop)
+        pass  # no sandbox lifecycle needed (tools call MCP servers directly)
 
     synthesis = await synthesize_results(
         package_results,
@@ -557,7 +573,7 @@ def _update_state_from_event(
                 st["detail"] = label[:60]
                 st["logs"].append(label[:40])
 
-        # General orchestrator progress messages
+        # General orchestrator progress messages; also try to parse final JSON
         if "messages" in node_output:
             msgs = node_output["messages"]
             if isinstance(msgs, list) and msgs:
@@ -569,6 +585,36 @@ def _update_state_from_event(
                     snippet = content.strip()[:80]
                     if snippet:
                         main_lines.append(snippet)
+                    # Try to parse final orchestrator JSON (package_results + synthesis)
+                    raw = content.strip()
+                    # Strip markdown code fences if present
+                    if raw.startswith("```"):
+                        raw = "\n".join(
+                            ln for ln in raw.splitlines()
+                            if not ln.startswith("```")
+                        ).strip()
+                    if raw.startswith("{") and "package_results" in raw:
+                        try:
+                            parsed = json.loads(raw)
+                            for r in parsed.get("package_results", []):
+                                pkg_name = r.get("package") if isinstance(r, dict) else None
+                                if pkg_name and not any(
+                                    p.get("package") == pkg_name for p in package_results
+                                ):
+                                    package_results.append(r)
+                                    risk = str(r.get("risk_rating", "")).lower()
+                                    if pkg_name in pkg_state:
+                                        completion_counter[0] += 1
+                                        st = pkg_state[pkg_name]
+                                        st["status"] = "done"
+                                        st["risk_rating"] = risk
+                                        st["completion_order"] = completion_counter[0]
+                                        total_cves = r.get("total_cves_found", 0)
+                                        st["detail"] = f"risk={risk.upper()}  {total_cves} CVEs"
+                                        st["logs"].append("audit complete")
+                                        main_lines.append(f"✓ {pkg_name}: {risk.upper()}")
+                        except (json.JSONDecodeError, KeyError):
+                            pass
 
 
 def main() -> int:

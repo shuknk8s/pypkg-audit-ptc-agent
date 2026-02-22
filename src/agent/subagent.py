@@ -8,10 +8,8 @@ LangChain @tool wrappers for NVD, PyPI, and GitHub data.
 from __future__ import annotations
 
 from deepagents import SubAgent, create_deep_agent
-from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.state import StateBackend
 
-from src.sandbox.docker_backend import DockerBackend
 from src.tools.audit_tools import github_release_notes, nvd_cve_search, pypi_package_info
 
 PACKAGE_AUDITOR_SYSTEM_PROMPT = """
@@ -48,21 +46,24 @@ PTC VIOLATION — these actions are FORBIDDEN:
 ═══════════════════════════════════════════════════════════
 Audit protocol (execute in this exact order)
 ═══════════════════════════════════════════════════════════
-1. PTD: read_file("/audit/docs/pypi_tool.md")
+1. PTD: read_file("/audit/docs/pypi_tool.md")  [if available; skip if file not found]
 2. PTC: pypi_package_info({package}) → use compact: latest_version, github_repository
-3. PTD: read_file("/audit/docs/nvd_tool.md")
+3. PTD: read_file("/audit/docs/nvd_tool.md")  [if available; skip if file not found]
 4. PTC: nvd_cve_search({package}, {pinned_version}) → use compact: affecting_pinned, severity_counts, needs_interpretation
-5. PTD: read_file("/audit/docs/github_tool.md")
+5. PTD: read_file("/audit/docs/github_tool.md")  [if available; skip if file not found]
 6. PTC: github_release_notes({github_repository}, {pinned_version}, {latest_version}) → use compact: breaking_hints_found, breaking_keywords
 7. If needs_interpretation > 0: task("interpret CVEs at {nvd_ptc_data_path} for {package}=={pinned_version}", "cve-interpreter")
 8. If breaking_hints_found: task("analyse changelog at {github_ptc_data_path} for {package} {pinned_version}→{latest_version}", "changelog-analyst")
 9. Compute risk_rating from severity_counts (critical/high ≥ 2 → high; 1 → medium; 0 → low)
-10. write_file("/audit/results/{package}.json", structured_findings_json)
-
-structured_findings_json fields: package, pinned_version, latest_version,
-versions_behind, cves_affecting_pinned, cves_not_relevant, total_cves_found,
-changelog_analysis, breaking_changes_detected, risk_rating, upgrade_recommendation,
-recommendation_rationale.
+10. Your FINAL message MUST be ONLY valid JSON (no markdown, no prose). Use this schema:
+{
+  "package": "...", "pinned_version": "...", "latest_version": "...",
+  "versions_behind": <int>, "total_cves_found": <int>,
+  "cves_affecting_pinned": <int>, "cves_not_relevant": <int>,
+  "changelog_analysis": "...", "breaking_changes_detected": <bool>,
+  "risk_rating": "low|medium|high", "upgrade_recommendation": "...",
+  "recommendation_rationale": "..."
+}
 """.strip()
 
 CVE_INTERPRETER_SYSTEM_PROMPT = """
@@ -132,34 +133,19 @@ changelog_analyst: SubAgent = {
 }
 
 
-def create_package_auditor_subagent(docker_backend: DockerBackend):
+def create_package_auditor_subagent():
     """Return a compiled LangGraph graph for per-package security auditing.
 
-    DockerBackend provides the execute() sandbox tool. CompositeBackend routes
-    /audit/ paths to an ephemeral StateBackend so result JSON never re-enters
-    the LLM context window (PTC invariant).
-
-    StateBackend requires a ToolRuntime injected at execution time, so we pass a
-    backend factory callable instead of a pre-constructed backend instance.
-
-    Args:
-        docker_backend: A DockerBackend wrapping a DockerSandbox instance.
+    Uses StateBackend so all read_file/write_file calls operate on the LangGraph
+    state 'files' channel. PTD docs pre-loaded in the orchestrator's initial state
+    are available here because deepagents copies parent state to child on task().
 
     Returns:
         A langgraph.graph.state.CompiledStateGraph ready to stream events.
     """
-
-    def _make_backend(runtime):
-        return CompositeBackend(
-            default=docker_backend,
-            routes={
-                "/audit/": StateBackend(runtime),
-            },
-        )
-
     return create_deep_agent(
         model="gpt-4o",
-        backend=_make_backend,
+        backend=lambda runtime: StateBackend(runtime),
         tools=[nvd_cve_search, pypi_package_info, github_release_notes],
         subagents=[cve_interpreter, changelog_analyst],
         system_prompt=PACKAGE_AUDITOR_SYSTEM_PROMPT,

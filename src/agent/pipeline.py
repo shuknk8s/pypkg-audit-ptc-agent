@@ -16,102 +16,72 @@ the system prompt.
 from __future__ import annotations
 
 from deepagents import create_deep_agent
-from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.backends.state import StateBackend
 from deepagents.middleware.subagents import CompiledSubAgent
 
 from src.agent.subagent import create_package_auditor_subagent
 from src.config.loaders import load_from_file
-from src.sandbox.docker_backend import DockerBackend
 from src.sandbox.docker_sandbox import DockerSandbox
-from src.tools.audit_tools import PTD_DOC_FILES
 
 ORCHESTRATOR_SYSTEM_PROMPT = """
 You are a multi-package dependency security audit orchestrator.
-You receive a list of Python packages with their pinned versions.
+You receive a list of Python packages with their pinned versions in your first message.
 
 Steps:
-1. Use write_todos to plan the audit — one todo per package.
-2. For each package, use task(f"audit {package}=={version}", "package-auditor")
-   to delegate to the package auditor subagent.
-3. Wait for all package audits to complete.
-4. Read all results from /audit/results/ using read_file.
-5. Synthesize a cross-package risk summary with upgrade priority ordering.
-6. Return a JSON object with keys: package_results (list), synthesis (dict).
+1. Parse the package list from the user message (format: pkg==version, one per line).
+2. Use write_todos to plan the audit — one todo per package.
+3. For each package, call task("Audit package <pkg>==<version>. Return ONLY a compact JSON object (no markdown, no prose) with these exact keys: package, pinned_version, latest_version, versions_behind, total_cves_found, cves_affecting_pinned, cves_not_relevant, changelog_analysis, breaking_changes_detected, risk_rating (low|medium|high), upgrade_recommendation, recommendation_rationale.", "package-auditor")
+   Call as many tasks in PARALLEL as possible.
+4. Each task() call returns the subagent's compact JSON for that package.
+   Parse each result and add to your package_results list.
+5. After all tasks complete, return a final JSON message with exactly these keys:
+   {
+     "package_results": [ <list of per-package audit dicts from step 4> ],
+     "synthesis": {
+       "prioritized_packages": [ <sorted by risk descending, each item has: rank, package, risk_rating, total_cves_found, versions_behind, upgrade_recommendation> ],
+       "detailed_summary": "<one paragraph cross-package summary>"
+     }
+   }
 
-Maintain the PTC invariant: raw tool data stays in files, not in your context window.
+IMPORTANT: Your final message MUST be valid JSON only. No markdown code fences, no prose.
 """.strip()
 
 
 def create_audit_pipeline(config_path: str = "config.yaml"):
-    """Build the orchestrator graph and a DockerSandbox (not yet started).
+    """Build the orchestrator graph.
 
-    Composes:
-    - DockerSandbox → DockerBackend → per-package auditor subagent graph
-    - Orchestrator deep agent with SubAgentMiddleware + SummarizationMiddleware
+    The orchestrator uses StateBackend so all read_file/write_file calls operate
+    on the LangGraph state 'files' channel. This ensures:
+    - PTD docs pre-loaded in the initial input state are readable by both orchestrator
+      and per-package subagents (deepagents copies parent state to child on task()).
+    - Results written by subagents propagate back to the orchestrator state.
 
-    Note: CompiledSubAgent is used (not SubAgent) to pass the pre-built per-package
-    graph as the runnable — this is the correct deepagents API for pre-compiled graphs.
-    The design doc used a `_runnable` key inside SubAgent which does not exist; the
-    actual API uses CompiledSubAgent(name, description, runnable).
+    Note: create_deep_agent adds SubAgentMiddleware and SummarizationMiddleware
+    internally when subagents are provided; do not pass them explicitly.
 
     Args:
         config_path: Path to config.yaml (default: "config.yaml").
 
     Returns:
-        Tuple of (orchestrator_graph, sandbox). Call sandbox.start() before invoking.
+        Tuple of (orchestrator_graph, sandbox). sandbox is kept for DockerSandbox
+        lifecycle management but is no longer used for agent file operations.
     """
     config = load_from_file(config_path)
     sandbox = DockerSandbox(image=config.docker.image)
-    docker_backend = DockerBackend(sandbox)
 
-    package_auditor_graph = create_package_auditor_subagent(docker_backend)
+    package_auditor_graph = create_package_auditor_subagent()
 
     package_auditor_spec: CompiledSubAgent = {
         "name": "package-auditor",
-        "description": "Audits a single Python package for CVEs and changelog breaking changes",
+        "description": "Audits a single Python package for CVEs and changelog breaking changes. Returns compact JSON.",
         "runnable": package_auditor_graph,
     }
 
-    # Orchestrator uses a local FilesystemBackend (no Docker) — it only delegates
-    # via task() and reads synthesis results.
-    # Note: create_deep_agent adds SubAgentMiddleware and SummarizationMiddleware
-    # internally when subagents are provided; passing them explicitly causes a
-    # "duplicate middleware" error. The internal SummarizationMiddleware trigger
-    # defaults are adequate (fraction-of-context based).
-    orchestrator_backend = FilesystemBackend(virtual_mode=True)
-
     orchestrator = create_deep_agent(
         model="gpt-4o",
-        backend=orchestrator_backend,
+        backend=lambda runtime: StateBackend(runtime),
         subagents=[package_auditor_spec],
         system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
     )
 
-    # PTD bootstrap — pre-write tool doc files into the agent filesystem.
-    # Each per-package subagent reads these via read_file("/audit/docs/{tool}_tool.md")
-    # before calling that tool for the first time. This satisfies PTD without
-    # injecting doc content eagerly into the system prompt.
-    _bootstrap_ptd_docs(docker_backend)
-
     return orchestrator, sandbox
-
-
-def _bootstrap_ptd_docs(docker_backend: DockerBackend) -> None:
-    """Write PTD tool documentation files into the agent filesystem.
-
-    Files are written to /audit/docs/ in the DockerBackend filesystem so the
-    per-package auditor subagent can read_file() them on demand.
-
-    This is a no-op if the sandbox is not yet started — bootstrap is called
-    after sandbox.start() in audit.py.
-    """
-    for filename, local_path in PTD_DOC_FILES.items():
-        if not local_path.exists():
-            continue
-        try:
-            content = local_path.read_text(encoding="utf-8")
-            docker_backend.write(f"/audit/docs/{filename}", content)
-        except Exception:
-            # Sandbox may not be running yet at construction time;
-            # audit.py calls _bootstrap_ptd_docs() again after sandbox.start()
-            pass
