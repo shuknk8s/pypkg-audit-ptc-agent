@@ -1,6 +1,7 @@
-from typing import Literal
+import operator
+from typing import Annotated, Literal, TypedDict
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class CVEEntry(BaseModel):
@@ -46,3 +47,22 @@ def validate_phase3_result(data: dict) -> Phase3Result:
         return Phase3Result.model_validate(data)
     except ValidationError as exc:
         raise ValueError(f"Invalid phase 3 result: {exc}") from exc
+
+
+class CVEFinding(BaseModel):
+    """Structured CVE finding produced by the cve-interpreter subagent."""
+
+    cve_id: str
+    severity: str = "unknown"
+    status: str
+    determination_method: str = "cpe_range"
+    description: str = ""
+
+
+class AuditState(TypedDict):
+    """LangGraph state schema for the top-level audit orchestrator graph."""
+
+    packages: list[dict]
+    package_results: Annotated[list, operator.add]
+    synthesis: dict
+    run_id: str
