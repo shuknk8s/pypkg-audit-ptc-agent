@@ -1,3 +1,10 @@
+llm:
+  model: "gpt-4o"
+  temperature: 0.0
+  max_tokens: 4096
+  seed: 42
+  top_p: 1.0
+
 docker:
   image: "pypkg-audit-ptc-agent:latest"
   container_name: "pypkg-audit-ptc-agent-sandbox"

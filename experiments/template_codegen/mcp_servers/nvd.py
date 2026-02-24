@@ -1,33 +1,11 @@
+"""Experiment-local NVD server: retry logic + summary_version heuristic."""
 import re
-import time
 
 from mcp.server.fastmcp import FastMCP
-import httpx
+
+from experiments.template_codegen.mcp_servers.retry import get_with_retry
 
 mcp = FastMCP("nvd")
-
-MAX_RETRIES = 3
-BACKOFF_BASE = 2  # seconds — NVD rate limit is 5 req/30s without API key
-
-
-def _get_with_retry(url: str, **kwargs) -> httpx.Response:
-    """HTTP GET with retry on transient errors (429, 5xx, timeouts)."""
-    timeout = kwargs.pop("timeout", 20)
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = httpx.get(url, timeout=timeout, **kwargs)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(BACKOFF_BASE * (attempt + 1))
-                    continue
-            resp.raise_for_status()
-            return resp
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(BACKOFF_BASE * (attempt + 1))
-                continue
-            raise
-    raise httpx.HTTPError(f"Failed after {MAX_RETRIES} retries")
 
 
 def _clean_text(value: str) -> str:
@@ -62,7 +40,6 @@ def _cmp(a: str, b: str) -> int:
 
 
 def _is_in_range(version: str, match: dict) -> bool:
-    # NVD range keys commonly appear on cpeMatch entries.
     vsi = match.get("versionStartIncluding")
     vse = match.get("versionStartExcluding")
     vei = match.get("versionEndIncluding")
@@ -78,24 +55,17 @@ def _is_in_range(version: str, match: dict) -> bool:
     return True
 
 
-_VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)*")
-
-# Patterns that indicate an upper bound: "before X", "prior to X", "<= X", "< X",
-# "through X", "up to X", "upgrade to X or higher" (implies affects < X)
+# --- Summary version heuristic ---
 _UPPER_BOUND_RE = re.compile(
     r"(?:before|prior\s+to|<\s*=?|through|up\s+to)"
     r"\s*(?:version\s*)?"
     r"(\d+\.\d+(?:\.\d+)*)",
     re.IGNORECASE,
 )
-
-# "upgrade … to version X or higher" → affects versions < X
 _UPGRADE_TO_RE = re.compile(
     r"upgrade\s+\S+\s+to\s+(?:version\s*)?(\d+\.\d+(?:\.\d+)*)\s+or\s+(?:higher|later|above)",
     re.IGNORECASE,
 )
-
-# "versions = X.Y.Z" or "versions <= X.Y.Z" (equality/lte in summary text)
 _VERSIONS_EQ_RE = re.compile(
     r"versions?\s*[<>]?=\s*(\d+\.\d+(?:\.\d+)*)",
     re.IGNORECASE,
@@ -113,7 +83,6 @@ def _check_summary_version(package: str, version: str, summary: str) -> str | No
     if pkg_lower not in lower:
         return None
 
-    # Collect upper-bound versions from all patterns
     upper_bounds = []
     for m in _UPPER_BOUND_RE.finditer(lower):
         upper_bounds.append(m.group(1))
@@ -125,24 +94,20 @@ def _check_summary_version(package: str, version: str, summary: str) -> str | No
     if not upper_bounds:
         return None
 
-    # Use the highest upper bound found — if pinned version >= all bounds,
-    # the CVE doesn't affect this version
     for bound in upper_bounds:
         if _cmp(version, bound) >= 0:
             continue
-        # version < this bound → possibly affected
         return "affecting_pinned"
 
-    # version >= all upper bounds → not affected
     return "not_relevant"
 
 
 @mcp.tool()
-def search_cves(package: str, version: str | None = None) -> dict:
+def search_cves(package_name: str, version: str | None = None) -> dict:
     try:
-        resp = _get_with_retry(
+        resp = get_with_retry(
             "https://services.nvd.nist.gov/rest/json/cves/2.0",
-            params={"keywordSearch": package, "resultsPerPage": 50},
+            params={"keywordSearch": package_name, "resultsPerPage": 50},
             timeout=20,
             follow_redirects=True,
         )
@@ -174,7 +139,7 @@ def search_cves(package: str, version: str | None = None) -> dict:
                 for node in nodes if isinstance(nodes, list) else []:
                     for match in node.get("cpeMatch", []) if isinstance(node.get("cpeMatch", []), list) else []:
                         criteria = str(match.get("criteria") or "").lower()
-                        if package.lower() in criteria:
+                        if package_name.lower() in criteria:
                             matched_cpe = True
                             if version and _is_in_range(version, match):
                                 status = "affecting_pinned"
@@ -183,13 +148,11 @@ def search_cves(package: str, version: str | None = None) -> dict:
                             else:
                                 status = "needs_interpretation"
             if not matched_cpe:
-                # fallback heuristic for keyword-only matches
                 lower_summary = summary.lower()
-                if package.lower() not in lower_summary:
+                if package_name.lower() not in lower_summary:
                     status = "not_relevant"
                 elif version:
-                    # Try to parse version ranges from summary text
-                    summary_status = _check_summary_version(package, version, summary)
+                    summary_status = _check_summary_version(package_name, version, summary)
                     if summary_status is not None:
                         status = summary_status
             results.append(
@@ -201,20 +164,20 @@ def search_cves(package: str, version: str | None = None) -> dict:
                     "status": status,
                     "determination_method": (
                         "cpe_range" if matched_cpe and status in {"affecting_pinned", "not_relevant"}
-                        else "summary_version" if not matched_cpe and status in {"affecting_pinned", "not_relevant"} and package.lower() in summary.lower()
+                        else "summary_version" if not matched_cpe and status in {"affecting_pinned", "not_relevant"} and package_name.lower() in summary.lower()
                         else "heuristic"
                     ),
                 }
             )
         return {
-            "package": package,
+            "package": package_name,
             "version": version,
             "results": results,
             "source": "nvd",
         }
     except Exception as e:
         return {
-            "package": package,
+            "package": package_name,
             "version": version,
             "results": [],
             "source": "nvd",

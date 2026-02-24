@@ -1,14 +1,8 @@
-"""DockerSandbox — implements SandboxBackendProtocol directly.
+"""DockerSandbox — single shared Docker container for all packages in a run.
 
-Follows the official deepagents custom-backend pattern:
-  class DockerSandbox(SandboxBackendProtocol):
-      def __init__(self, ...):
-          self.container = docker_client.containers.run(...)  # starts in __init__
-      def execute(self, command) -> ExecuteResponse: ...
-      # + all BackendProtocol filesystem methods
-
-Passed directly to create_deep_agent(backend=sandbox).
-No separate wrapper class needed.
+Started once by pipeline.py, shared across all concurrent per-package subagents
+via asyncio.gather(). Each package writes its generated scripts to a unique path
+(/app/code/phase2_<pkg>.py) to avoid collisions.
 """
 from __future__ import annotations
 
@@ -45,21 +39,21 @@ def _make_tar(filename: str, content: bytes) -> bytes:
 
 
 class DockerSandbox(SandboxBackendProtocol):
-    """Docker-backed sandbox — one container per instance.
+    """Docker-backed sandbox — one shared container per audit run.
 
-    Container starts synchronously in __init__ so it's immediately available.
-    Each instance has its own unique container, enabling external parallelism
-    via asyncio.gather() across multiple DockerSandbox instances.
+    Container starts synchronously in __init__. All per-package subagents
+    share the same instance concurrently via asyncio.gather(). Each package
+    uses a unique script path (/app/code/phase2_<pkg>.py) to avoid collisions.
     """
 
     def __init__(
         self,
-        image: str = "dep-audit-deepagent:latest",
+        image: str = "pypkg-audit-ptc-agent:latest",
         container_name: str | None = None,
         root_dir: str = "/app",
     ) -> None:
         self.image = image
-        self.container_name = container_name or f"dep-audit-{uuid.uuid4().hex[:8]}"
+        self.container_name = container_name or f"pypkg-audit-{uuid.uuid4().hex[:8]}"
         self.root_dir = root_dir.rstrip("/")
         self._sandbox_id = self.container_name
 
@@ -77,7 +71,6 @@ class DockerSandbox(SandboxBackendProtocol):
             self.image,
             ["tail", "-f", "/dev/null"],
             detach=True,
-            tty=True,
             name=self.container_name,
         )
 
@@ -154,7 +147,6 @@ class DockerSandbox(SandboxBackendProtocol):
         output, truncated = self._summarize(output)
         return ExecuteResponse(output=output, exit_code=exit_code, truncated=truncated)
 
-    # aexecute is inherited from SandboxBackendProtocol — it handles timeout kwarg correctly
 
     # ------------------------------------------------------------------
     # BackendProtocol filesystem — all operations via Docker API

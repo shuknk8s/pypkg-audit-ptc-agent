@@ -1,35 +1,16 @@
-import time
-
+"""Experiment-local EPSS server with retry logic."""
 from mcp.server.fastmcp import FastMCP
-import httpx
+
+from experiments.template_codegen.mcp_servers.retry import get_with_retry
 
 mcp = FastMCP("epss")
-
-
-def _get_with_retry(url: str, *, max_retries: int = 3, backoff: int = 1, **kwargs) -> httpx.Response:
-    timeout = kwargs.pop("timeout", 15)
-    for attempt in range(max_retries):
-        try:
-            resp = httpx.get(url, timeout=timeout, **kwargs)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if attempt < max_retries - 1:
-                    time.sleep(backoff * (attempt + 1))
-                    continue
-            resp.raise_for_status()
-            return resp
-        except (httpx.TimeoutException, httpx.ConnectError):
-            if attempt < max_retries - 1:
-                time.sleep(backoff * (attempt + 1))
-                continue
-            raise
-    raise httpx.HTTPError(f"Failed after {max_retries} retries")
 
 
 @mcp.tool()
 def get_exploit_probability(cve_id: str) -> dict:
     """Get EPSS exploit probability score for a CVE."""
     try:
-        resp = _get_with_retry(
+        resp = get_with_retry(
             f"https://api.first.org/data/v1/epss?cve={cve_id}",
             timeout=15,
             follow_redirects=True,
@@ -47,6 +28,7 @@ def get_exploit_probability(cve_id: str) -> dict:
         return {"cve_id": cve_id, "epss_score": None, "percentile": None, "source": "epss"}
     except Exception as e:
         return {"cve_id": cve_id, "epss_score": None, "percentile": None, "source": "epss", "error": str(e)}
+
 
 if __name__ == "__main__":
     mcp.run()

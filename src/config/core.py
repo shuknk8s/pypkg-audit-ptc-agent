@@ -2,8 +2,8 @@ from pydantic import BaseModel, Field
 
 
 class DockerConfig(BaseModel):
-    image: str = "ptc-v4-dep-gap:latest"
-    container_name: str = "ptc-v4-dep-gap-sandbox"
+    image: str = "pypkg-audit-ptc-agent:latest"
+    container_name: str = "pypkg-audit-ptc-agent-sandbox"
     auto_remove: bool = False
     network_mode: str = "bridge"
 

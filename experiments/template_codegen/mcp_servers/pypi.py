@@ -1,40 +1,18 @@
+"""Experiment-local PyPI server with retry logic."""
 import re
-import time
 
 from mcp.server.fastmcp import FastMCP
-import httpx
+
+from experiments.template_codegen.mcp_servers.retry import get_with_retry
 
 mcp = FastMCP("pypi")
 
-MAX_RETRIES = 3
-BACKOFF_BASE = 1  # seconds
-
-
-def _get_with_retry(url: str, **kwargs) -> httpx.Response:
-    """HTTP GET with retry on transient errors (429, 5xx, timeouts)."""
-    timeout = kwargs.pop("timeout", 15)
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = httpx.get(url, timeout=timeout, **kwargs)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(BACKOFF_BASE * (attempt + 1))
-                    continue
-            resp.raise_for_status()
-            return resp
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(BACKOFF_BASE * (attempt + 1))
-                continue
-            raise
-    raise httpx.HTTPError(f"Failed after {MAX_RETRIES} retries")
-
 
 @mcp.tool()
-def get_package_metadata(package: str) -> dict:
+def get_package_metadata(package_name: str) -> dict:
     try:
-        resp = _get_with_retry(
-            f"https://pypi.org/pypi/{package}/json",
+        resp = get_with_retry(
+            f"https://pypi.org/pypi/{package_name}/json",
             timeout=15,
             follow_redirects=True,
         )
@@ -64,7 +42,7 @@ def get_package_metadata(package: str) -> dict:
                 github_repository = m.group(1).rstrip("/")
                 break
         return {
-            "name": package,
+            "name": package_name,
             "latest_version": info.get("version"),
             "home_page": home_page,
             "github_repository": github_repository,
@@ -72,7 +50,7 @@ def get_package_metadata(package: str) -> dict:
         }
     except Exception as e:
         return {
-            "name": package,
+            "name": package_name,
             "latest_version": None,
             "home_page": None,
             "github_repository": None,

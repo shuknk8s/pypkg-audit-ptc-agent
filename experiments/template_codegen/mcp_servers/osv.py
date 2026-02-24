@@ -1,35 +1,16 @@
-import time
-
+"""Experiment-local OSV server with retry logic."""
 from mcp.server.fastmcp import FastMCP
-import httpx
+
+from experiments.template_codegen.mcp_servers.retry import post_with_retry
 
 mcp = FastMCP("osv")
-
-
-def _post_with_retry(url: str, *, max_retries: int = 3, backoff: int = 1, **kwargs) -> httpx.Response:
-    timeout = kwargs.pop("timeout", 15)
-    for attempt in range(max_retries):
-        try:
-            resp = httpx.post(url, timeout=timeout, **kwargs)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if attempt < max_retries - 1:
-                    time.sleep(backoff * (attempt + 1))
-                    continue
-            resp.raise_for_status()
-            return resp
-        except (httpx.TimeoutException, httpx.ConnectError):
-            if attempt < max_retries - 1:
-                time.sleep(backoff * (attempt + 1))
-                continue
-            raise
-    raise httpx.HTTPError(f"Failed after {max_retries} retries")
 
 
 @mcp.tool()
 def query_vulnerability(package: str, version: str, ecosystem: str = "PyPI") -> dict:
     """Query OSV database for vulnerabilities affecting a specific package version."""
     try:
-        resp = _post_with_retry(
+        resp = post_with_retry(
             "https://api.osv.dev/v1/query",
             json={"package": {"name": package, "ecosystem": ecosystem}, "version": version},
             timeout=15,
@@ -55,6 +36,7 @@ def _extract_severity(vuln: dict) -> str:
         if "CVSS" in score_str.upper():
             return score_str[:20]
     return "unknown"
+
 
 if __name__ == "__main__":
     mcp.run()

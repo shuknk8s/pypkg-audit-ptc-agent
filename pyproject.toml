@@ -1,7 +1,7 @@
 [project]
-name = "dep-audit-deepagent"
+name = "pypkg-audit-ptc-agent"
 version = "0.1.0"
-description = "Python dependency security auditor using LangChain Deep Agents — PTC/PTD token-efficient multi-agent architecture"
+description = "Python package security auditor — PTC/PTD token-efficient architecture with Docker sandbox codegen"
 requires-python = ">=3.12"
 dependencies = [
     "deepagents>=0.4.0",
@@ -31,7 +31,7 @@ build-backend = "hatchling.build"
 packages = ["src"]
 
 [project.urls]
-Repository = "https://github.com/shuknk8s/dep-audit-deepagent"
+Repository = "https://github.com/shuknk8s/pypkg-audit-ptc-agent"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -7,8 +7,8 @@ from src.config.core import CoreConfig
 
 DEFAULT_CONFIG = {
     "docker": {
-        "image": "dep-audit-deepagent:latest",
-        "container_name": "dep-audit-deepagent-sandbox",
+        "image": "pypkg-audit-ptc-agent:latest",
+        "container_name": "pypkg-audit-ptc-agent-sandbox",
         "auto_remove": False,
         "network_mode": "bridge",
     },

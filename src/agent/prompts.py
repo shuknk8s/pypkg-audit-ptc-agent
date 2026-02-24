@@ -1,14 +1,22 @@
-"""PTC + PTD compliant prompts — identical pattern to ptc-v4-dep-gap-agentic.
+"""PTC + PTD compliant prompts — real Progressive Tool Discovery.
 
 The LLM is asked to write a Python script (returned in a code fence).
 Python code extracts it, writes it to the Docker container, and executes it.
 Raw tool responses never leave the container (PTC).
-The script reads docs from /app/tools/docs/ (PTD).
+
+Real PTD: Phase A sees only a lightweight catalog of Phase B tools (name +
+one-line description, NO schemas).  The LLM outputs _tools_needed.  Phase B
+prompt loads full schemas ONLY for tools the LLM requested.
 """
 import json
+import re
 from textwrap import dedent
 
-_PHASE2_SCHEMA_DOC = dedent("""\
+
+def _safe_name(package_name: str) -> str:
+    return re.sub(r'[^a-zA-Z0-9_.-]+', '_', package_name)
+
+_OUTPUT_SCHEMA_DOC = dedent("""\
     {
       "package": "<str>",
       "pinned_version": "<str>",
@@ -34,7 +42,10 @@ _PHASE2_SCHEMA_DOC = dedent("""\
     }""")
 
 _OUTPUT_INSTRUCTION = (
-    'Output the final JSON via the base64 marker exactly like this:\n'
+    'Before outputting, add tool call tracking to the result:\n'
+    '  from tools.mcp_client import get_tools_called\n'
+    '  result["_tools_called"] = get_tools_called()\n'
+    'Then output the final JSON via the base64 marker exactly like this:\n'
     '  print("__PTC_JSON_B64__" + base64.b64encode(json.dumps(result).encode("utf-8")).decode("ascii"))\n'
     'Do NOT print any other JSON or unstructured text to stdout — only the marker line.'
 )
@@ -79,8 +90,8 @@ def build_system_prompt(tool_catalog_summary: str) -> str:
           {{"notes": ["v2.29.0: ...", "v2.30.0: ..."], "error": null}}
         Notes may be empty. If "error" is set, use empty list for changelog_excerpts.
 
-        OUTPUT SCHEMA (Phase2Result):
-        {_PHASE2_SCHEMA_DOC}
+        OUTPUT SCHEMA (AuditFindings):
+        {_OUTPUT_SCHEMA_DOC}
 
         {tool_catalog_summary}""")
 
@@ -89,97 +100,138 @@ def build_codegen_prompt(package_name: str, pinned_version: str) -> str:
     return dedent(f"""\
         Write a Python script to audit **{package_name}=={pinned_version}**.
 
-        The script must:
-        1. `sys.path.insert(0, "/app")` then import from `tools.nvd`, `tools.pypi`, `tools.github_api`.
-        2. Before calling ANY tool for the first time, read its doc file:
-           `doc = open("/app/tools/docs/<server>/<tool>.md").read()`
-           You MUST do this for every tool — core and Phase B alike. Example:
-           ```
-           doc = open("/app/tools/docs/nvd/search_cves.md").read()
-           from tools.nvd import search_cves
-           doc = open("/app/tools/docs/pypi/get_package_metadata.md").read()
-           from tools.pypi import get_package_metadata
-           doc = open("/app/tools/docs/github_api/get_release_notes.md").read()
-           from tools.github_api import get_release_notes
-           ```
-        3. Call `get_package_metadata(package_name="{package_name}")` to get latest_version and github_repository.
-        4. Call `search_cves(package_name="{package_name}", version="{pinned_version}")` for CVEs.
-        5. Call `get_release_notes(owner=<owner>, repo=<repo>, from_version="{pinned_version}", to_version=<latest>)` for changelog.
-        6. Decode every tool response — they return MCP envelopes, NOT raw data.
-           Use: `json.loads(response["content"][0]["text"])` to get the payload.
+        The script must follow ALL steps below. Read each tool's doc before use:
+        `doc = open("/app/tools/docs/<server>/<tool>.md").read()`
+
+        Core audit:
+        1. `sys.path.insert(0, "/app")`.
+        2. Read docs and import core tools:
+           `doc = open("/app/tools/docs/nvd/search_cves.md").read()`
+           `from tools.nvd import search_cves`
+           `doc = open("/app/tools/docs/pypi/get_package_metadata.md").read()`
+           `from tools.pypi import get_package_metadata`
+           `doc = open("/app/tools/docs/github_api/get_release_notes.md").read()`
+           `from tools.github_api import get_release_notes`
+        3. Call `get_package_metadata(package="{package_name}")` → latest_version, github_repository.
+        4. Call `search_cves(package="{package_name}", version="{pinned_version}")` → CVEs.
+        5. Call `get_release_notes(owner, repo, from_version="{pinned_version}", to_version=latest)` → changelog.
+        6. Decode every MCP envelope: `json.loads(response["content"][0]["text"])`.
         7. Partition CVEs into cves_affecting_pinned, cves_not_relevant, needs_interpretation
            based on the "status" field already present in each CVE entry from the NVD tool.
            Normalize each CVE to the CVEEntry schema (cve_id, severity, summary, status, determination_method).
         8. Compute versions_behind, total_cves_found, risk_rating, upgrade_recommendation.
-        9. Output the result as JSON via the __PTC_JSON_B64__ marker.
 
-        ## Phase B — Enrichment (ALWAYS include this code block):
-        After steps 3-5, the script MUST include the following Phase B enrichment.
-        These calls are wrapped in try/except so failures are harmless, but the code
-        MUST be present. Copy this pattern into your script after the core steps:
+        Tool selection:
+        9. Based on the data collected, set `result["_tools_needed"]` to a list of
+           server names from the catalog below. Full schemas will be loaded in a
+           follow-up step — you are only selecting here.
 
-        ```
-        # --- Phase B enrichment ---
-        doc = open("/app/tools/docs/epss/get_exploit_probability.md").read()
-        from tools.epss import get_exploit_probability
-        doc = open("/app/tools/docs/osv/query_vulnerability.md").read()
-        from tools.osv import query_vulnerability
-        doc = open("/app/tools/docs/scorecard/get_security_scorecard.md").read()
-        from tools.scorecard import get_security_scorecard
-        doc = open("/app/tools/docs/deps_dev/get_dependency_info.md").read()
-        from tools.deps_dev import get_dependency_info
-        doc = open("/app/tools/docs/license_check/check_license.md").read()
-        from tools.license_check import check_license
+           CATALOG (server name → when to request):
+           - "epss"      — EPSS exploit-probability scores. Request when ANY CVEs are in cves_affecting_pinned.
+           - "osv"       — OSV database cross-reference. Request when ANY CVEs are in cves_affecting_pinned.
+           - "scorecard" — OpenSSF repo scorecard. Request when github_repository is available.
+           - "deps_dev"  — Dependency tree from deps.dev. Request when versions_behind >= 3.
 
-        # EPSS scores for affecting CVEs
-        for cve in cves_affecting_pinned[:5]:
-            try:
-                epss_resp = get_exploit_probability(cve_id=cve["cve_id"])
-                epss_data = json.loads(epss_resp["content"][0]["text"])
-                cve["epss_score"] = epss_data.get("epss_score")
-            except Exception:
-                pass
+           Set `result["_tools_needed"]` to a Python list of the server name strings
+           you need, e.g. `["epss", "osv"]`.  Use `[]` ONLY when none of the
+           conditions above are met (zero affecting CVEs, no repo, fewer than 3
+           versions behind).
 
-        # OSV cross-reference
-        try:
-            osv_resp = query_vulnerability(package="{package_name}", version="{pinned_version}")
-            osv_data = json.loads(osv_resp["content"][0]["text"])
-        except Exception:
-            osv_data = {{"results": []}}
-
-        # Scorecard (if GitHub repo found)
-        scorecard_data = {{}}
-        if github_repository and "/" in github_repository:
-            try:
-                sc_resp = get_security_scorecard(owner=owner, repo=repo)
-                scorecard_data = json.loads(sc_resp["content"][0]["text"])
-            except Exception:
-                pass
-
-        # deps.dev dependency info
-        try:
-            dd_resp = get_dependency_info(package="{package_name}", version="{pinned_version}")
-            dd_data = json.loads(dd_resp["content"][0]["text"])
-        except Exception:
-            dd_data = {{}}
-
-        # License check
-        try:
-            lic_resp = check_license(package="{package_name}")
-            lic_data = json.loads(lic_resp["content"][0]["text"])
-        except Exception:
-            lic_data = {{}}
-        ```
-
-        Phase B results do NOT change the output schema — use them to inform risk_rating
-        and upgrade_recommendation text.
+        Output:
+        10. Output the result as JSON via the __PTC_JSON_B64__ marker.
 
         ## Error handling
         - Wrap each tool call in try/except. On failure, use empty results and continue.
-        - If github_repository is missing or doesn't contain "/", skip get_release_notes and GitHub-dependent tools.
+        - If github_repository is missing or doesn't contain "/", skip get_release_notes.
         - `versions_behind`: compute as the rough distance between pinned and latest version tuples.
         - `risk_rating`: "critical" if >=3 affecting CVEs with critical/high severity;
           "high" if >=2 affecting; "medium" if 1 affecting; "low" otherwise.
+
+        Return ONLY the Python script inside a ```python code fence.""")
+
+
+_PHASE_B_SCHEMAS = {
+    "epss": dedent("""\
+        Read doc and import:
+          doc = open("/app/tools/docs/epss/get_exploit_probability.md").read()
+          from tools.epss import get_exploit_probability
+        For each CVE in core_results["cves_affecting_pinned"] (up to 5):
+          call get_exploit_probability(cve_id=cve["cve_id"])
+          Decoded response: {"cve_id": "...", "epss_score": 0.05, "percentile": 0.87}
+          Store epss_score on the CVE dict."""),
+    "osv": dedent("""\
+        Read doc and import:
+          doc = open("/app/tools/docs/osv/query_vulnerability.md").read()
+          from tools.osv import query_vulnerability
+        Call query_vulnerability(package="{package_name}", version="{pinned_version}")
+        Decoded response: {"vulnerabilities": [...], "source": "osv"}
+        Store as result["osv_results"]."""),
+    "scorecard": dedent("""\
+        Read doc and import:
+          doc = open("/app/tools/docs/scorecard/get_security_scorecard.md").read()
+          from tools.scorecard import get_security_scorecard
+        Extract owner, repo from core_results["github_repository"] (split on "/").
+        Call get_security_scorecard(owner=owner, repo=repo)
+        Decoded response: {"overall_score": 7.5, "checks": [...]}
+        Store as result["scorecard_data"]."""),
+    "deps_dev": dedent("""\
+        Read doc and import:
+          doc = open("/app/tools/docs/deps_dev/get_dependency_info.md").read()
+          from tools.deps_dev import get_dependency_info
+        Call get_dependency_info(package="{package_name}", version="{pinned_version}")
+        Decoded response: {"dependencies": [...], "version_info": {...}}
+        Store as result["dependency_info"]."""),
+}
+
+
+def build_phase_b_prompt(
+    package_name: str,
+    pinned_version: str,
+    core_results: dict,
+    tools_needed: list[str],
+) -> str | None:
+    """Build Phase B codegen prompt with schemas ONLY for tools the LLM requested.
+
+    Returns None if tools_needed is empty (caller skips Phase B entirely).
+    Core results are passed via a sandbox file (not embedded in prompt) to avoid
+    the LLM breaking long base64 strings across lines.
+    """
+    if not tools_needed:
+        return None
+
+    # Build tool instructions for only the requested tools
+    tool_sections = []
+    for tool_name in tools_needed:
+        schema = _PHASE_B_SCHEMAS.get(tool_name)
+        if schema:
+            rendered = schema.replace("{package_name}", package_name).replace("{pinned_version}", pinned_version)
+            tool_sections.append(f"### {tool_name}\n{rendered}")
+
+    if not tool_sections:
+        return None
+
+    tools_block = "\n\n".join(tool_sections)
+
+    return dedent(f"""\
+        Write a Python script to enrich the audit of **{package_name}=={pinned_version}**
+        using the Phase B tools below.
+
+        1. `sys.path.insert(0, "/app")`
+        2. Load core results from the JSON file written by Phase A:
+           ```
+           import json
+           core = json.loads(open("/app/code/core_results_{_safe_name(package_name)}.json").read())
+           result = dict(core)
+           ```
+        3. Run ONLY these tools (wrap each in try/except):
+
+        {tools_block}
+
+        4. Decode every MCP envelope: `json.loads(response["content"][0]["text"])`.
+        5. Add tool call tracking:
+           `from tools.mcp_client import get_tools_called`
+           `result["_tools_called"] = get_tools_called()`
+        6. Output via __PTC_JSON_B64__ marker.
 
         Return ONLY the Python script inside a ```python code fence.""")
 
@@ -211,11 +263,22 @@ def build_interpretation_prompt(
     cve_json = json.dumps(ambiguous_cves, indent=2, ensure_ascii=False)
     return dedent(f"""\
         You are a vulnerability analyst. Determine whether each CVE below actually affects \
-        **{package_name}=={pinned_version}**.
+        the **{package_name}** package at version **{pinned_version}**.
+
+        CRITICAL: Many CVEs returned by keyword search are about OTHER projects that merely \
+        use or mention {package_name}. A CVE is "not_relevant" if:
+        - The CVE is about a different product/project (e.g. "OnyxForum", "Mealie", "APTRS") \
+        that happens to use {package_name} as a dependency
+        - The vulnerability is in application code, not in the {package_name} library itself
+        - The summary describes a bug in a specific app's usage of {package_name}, not a flaw \
+        in {package_name} core
+
+        A CVE is "affecting_pinned" ONLY if the vulnerability is in the {package_name} library \
+        itself and applies to version {pinned_version}.
 
         For each CVE, decide:
-        - "affecting_pinned" if the vulnerability applies to version {pinned_version}
-        - "not_relevant" if the vulnerability does not apply
+        - "affecting_pinned" if the vulnerability is in {package_name} itself and applies to {pinned_version}
+        - "not_relevant" otherwise
 
         Return a JSON array where each element has:
         {{

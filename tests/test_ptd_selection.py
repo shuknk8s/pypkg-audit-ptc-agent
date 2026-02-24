@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import re
 import pytest
-from src.agent.subagent import _check_ptd_compliance, step_compute_savings
+from src.agent.subagent import _check_ptd_compliance, _syntax_check, step_compute_savings
 from src.agent.schema import AuditContext
-from src.agent.prompts import build_codegen_prompt
+from src.agent.prompts import build_codegen_prompt, build_phase_b_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -124,41 +124,48 @@ from tools.pypi import get_package_metadata
 
 
 # ---------------------------------------------------------------------------
-# T5 — PTD token savings are measurable (static math)
+# T5 — PTD token savings vary per package (real PTD formula)
 # ---------------------------------------------------------------------------
 def test_ptd_token_savings_measurable():
-    """PTD saves ~500 tokens per call (700 eager - 200 system overhead).
+    """Real PTD saves tokens by loading only requested Phase B schemas.
 
-    Matches ptc-v4 methodology: conservative baseline of 700 tokens for
-    per-call doc injection that PTD eliminates.
+    Formula: ptd_savings = (N_PHASE_B_TOOLS - n_loaded) * TOKENS_PER_SCHEMA - CATALOG_OVERHEAD
+    - Clean package (0 loaded): (4-0)*50 - 50 = 150 tokens saved
+    - CVE-heavy package (3 loaded): (4-3)*50 - 50 = 0 tokens saved
+    - Savings scale with how few Phase B tools are needed.
     """
-    PTD_EAGER_TOKENS_OLD = 700   # old per-call doc injection
-    PTD_SYSTEM_OVERHEAD = 200    # shared system prompt overhead
-    ptd_savings = PTD_EAGER_TOKENS_OLD - PTD_SYSTEM_OVERHEAD
+    N_PHASE_B_TOOLS = 4
+    TOKENS_PER_PHASE_B_SCHEMA = 50
+    CATALOG_OVERHEAD = 50
 
-    assert ptd_savings == 500
-    assert ptd_savings > 0
+    # Clean package: no Phase B tools needed
+    n_loaded_clean = 0
+    savings_clean = (N_PHASE_B_TOOLS - n_loaded_clean) * TOKENS_PER_PHASE_B_SCHEMA - CATALOG_OVERHEAD
+    assert savings_clean == 150
 
-    # With a typical actual spend of ~2300 tokens and sandbox payload of ~20K chars
-    # (CVE-heavy package), PTC+PTD combined savings should exceed 60%
-    actual_tokens = 2300
-    sandbox_chars = 20000
-    ptc_avoided = sandbox_chars // 4  # 5000
-    react_total = actual_tokens + ptc_avoided + PTD_EAGER_TOKENS_OLD
-    total_saved = ptc_avoided + ptd_savings
-    combined_pct = total_saved / react_total * 100
+    # CVE-heavy package: 3 Phase B tools needed
+    n_loaded_heavy = 3
+    savings_heavy = (N_PHASE_B_TOOLS - n_loaded_heavy) * TOKENS_PER_PHASE_B_SCHEMA - CATALOG_OVERHEAD
+    assert savings_heavy == 0
 
-    assert combined_pct > 60, f"Expected >60% combined savings, got {combined_pct:.1f}%"
+    # Clean saves more than heavy
+    assert savings_clean > savings_heavy
+
+    # All 4 loaded: negative savings (catalog cost with no benefit)
+    n_loaded_all = 4
+    savings_all = (N_PHASE_B_TOOLS - n_loaded_all) * TOKENS_PER_PHASE_B_SCHEMA - CATALOG_OVERHEAD
+    assert savings_all == -50
+    assert savings_all < savings_heavy
 
 
 # ---------------------------------------------------------------------------
-# T6 — Codegen prompt mentions Phase B optional tools
+# T6 — Core prompt has catalog, NOT full schemas
 # ---------------------------------------------------------------------------
 def test_codegen_prompt_has_dynamic_selection():
-    """The codegen prompt should prescribe core tools AND mention optional Phase B tools."""
+    """The codegen prompt should have core tools AND a lightweight catalog of Phase B tools."""
     prompt = build_codegen_prompt("requests", "2.28.1")
 
-    # Must prescribe core tools (like ptc-v4)
+    # Must prescribe core tools
     assert "tools.nvd" in prompt
     assert "tools.pypi" in prompt
     assert "tools.github_api" in prompt
@@ -166,15 +173,89 @@ def test_codegen_prompt_has_dynamic_selection():
     assert "get_package_metadata" in prompt
     assert "get_release_notes" in prompt
 
-    # Must mention Phase B tools with ALWAYS-include directive
-    assert "Phase B" in prompt
-    assert "tools.epss" in prompt
-    assert "tools.scorecard" in prompt
-    assert "tools.osv" in prompt
-    assert "tools.deps_dev" in prompt
-    assert "tools.license_check" in prompt
-    assert "ALWAYS include" in prompt  # Phase B code block is mandatory
+    # Catalog section with Phase B server names and selection guidance
+    assert "CATALOG" in prompt
+    assert '"epss"' in prompt
+    assert '"osv"' in prompt
+    assert '"scorecard"' in prompt
+    assert '"deps_dev"' in prompt
 
-    # Must have explicit doc-read example in step 2 AND Phase B
-    assert 'open("/app/tools/docs/nvd/search_cves.md")' in prompt
-    assert 'open("/app/tools/docs/epss/get_exploit_probability.md")' in prompt
+    # Tools-needed instruction
+    assert "_tools_needed" in prompt
+
+    # Must NOT have full Phase B schemas/parameter names
+    assert "get_exploit_probability(cve_id=" not in prompt
+    assert "query_vulnerability(package=" not in prompt
+    assert "get_security_scorecard(owner=" not in prompt
+    assert "get_dependency_info(package=" not in prompt
+
+    # Must NOT have old conditional steps or section header
+    assert "IF `len(cves_affecting_pinned) > 0`" not in prompt
+    assert "Progressive tool discovery" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# T7 — Syntax check catches invalid Python before Docker round-trip
+# ---------------------------------------------------------------------------
+def test_syntax_check_valid():
+    """Valid Python passes syntax check."""
+    assert _syntax_check("x = 1\nprint(x)", "test") is None
+
+
+def test_syntax_check_invalid():
+    """Invalid Python is caught before Docker."""
+    err = _syntax_check("def foo(\n  x = 1", "test")
+    assert err is not None
+    assert "line" in err
+
+
+# ---------------------------------------------------------------------------
+# T9 — Phase B prompt returns None when no tools requested
+# ---------------------------------------------------------------------------
+def test_phase_b_prompt_none_when_no_tools():
+    """Phase B prompt returns None when no tools requested — LLM call skipped."""
+    result = build_phase_b_prompt("requests", "2.28.1", {"package": "requests"}, [])
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# T10 — Phase B prompt includes only requested schemas
+# ---------------------------------------------------------------------------
+def test_phase_b_prompt_selective_schemas():
+    """Phase B prompt loads only the schemas the LLM requested."""
+    core = {"package": "requests", "pinned_version": "2.28.1", "cves_affecting_pinned": [{"cve_id": "CVE-2023-1234"}]}
+
+    # Request only epss
+    prompt = build_phase_b_prompt("requests", "2.28.1", core, ["epss"])
+    assert prompt is not None
+    assert "get_exploit_probability" in prompt
+    assert "tools.epss" in prompt
+    # Should NOT contain unrequested tools
+    assert "tools.scorecard" not in prompt
+    assert "tools.osv" not in prompt
+    assert "tools.deps_dev" not in prompt
+
+    # Request epss + scorecard
+    prompt2 = build_phase_b_prompt("requests", "2.28.1", core, ["epss", "scorecard"])
+    assert "tools.epss" in prompt2
+    assert "tools.scorecard" in prompt2
+    assert "tools.osv" not in prompt2
+
+
+# ---------------------------------------------------------------------------
+# T11 — Core prompt has catalog but no Phase B parameter names
+# ---------------------------------------------------------------------------
+def test_core_prompt_catalog_not_schemas():
+    """Core prompt has lightweight catalog — tool names only, no parameter signatures."""
+    prompt = build_codegen_prompt("flask", "2.0.0")
+
+    # Catalog entries present (server names + when-to-request guidance)
+    assert '"epss"' in prompt
+    assert '"osv"' in prompt
+    assert '"scorecard"' in prompt
+    assert '"deps_dev"' in prompt
+
+    # But NO full parameter signatures for Phase B tools
+    assert "get_exploit_probability(cve_id=" not in prompt
+    assert "get_security_scorecard(owner=" not in prompt
+    assert "get_dependency_info(package=" not in prompt

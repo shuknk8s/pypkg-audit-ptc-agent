@@ -1,29 +1,11 @@
+"""Experiment-local GitHub API server with retry logic."""
 import os
-import time
 
 from mcp.server.fastmcp import FastMCP
-import httpx
+
+from experiments.template_codegen.mcp_servers.retry import get_with_retry
 
 mcp = FastMCP("github_api")
-
-
-def _get_with_retry(url: str, *, max_retries: int = 3, backoff: int = 1, **kwargs) -> httpx.Response:
-    timeout = kwargs.pop("timeout", 15)
-    for attempt in range(max_retries):
-        try:
-            resp = httpx.get(url, timeout=timeout, **kwargs)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if attempt < max_retries - 1:
-                    time.sleep(backoff * (attempt + 1))
-                    continue
-            resp.raise_for_status()
-            return resp
-        except (httpx.TimeoutException, httpx.ConnectError):
-            if attempt < max_retries - 1:
-                time.sleep(backoff * (attempt + 1))
-                continue
-            raise
-    raise httpx.HTTPError(f"Failed after {max_retries} retries")
 
 
 @mcp.tool()
@@ -35,11 +17,9 @@ def get_release_notes(owner: str, repo: str, from_version: str, to_version: str)
     repo_full = f"{owner}/{repo}"
     try:
         if owner == "unknown":
-            # best-effort repo discovery
-            q = repo
-            s = _get_with_retry(
+            s = get_with_retry(
                 "https://api.github.com/search/repositories",
-                params={"q": q, "sort": "stars", "order": "desc", "per_page": 1},
+                params={"q": repo, "sort": "stars", "order": "desc", "per_page": 1},
                 headers=headers,
                 timeout=15,
                 follow_redirects=True,
@@ -49,7 +29,7 @@ def get_release_notes(owner: str, repo: str, from_version: str, to_version: str)
                 full_name = items[0].get("full_name")
                 if isinstance(full_name, str) and "/" in full_name:
                     repo_full = full_name
-        releases = _get_with_retry(
+        releases = get_with_retry(
             f"https://api.github.com/repos/{repo_full}/releases",
             params={"per_page": 10},
             headers=headers,

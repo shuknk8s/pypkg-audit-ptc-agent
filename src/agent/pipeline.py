@@ -1,6 +1,5 @@
 """Audit pipeline — single shared Docker container, all packages in parallel.
 
-Identical approach to ptc-v4-dep-gap-agentic:
   - One DockerSandbox started once, stopped once
   - Tools uploaded once
   - All packages run concurrently via asyncio.gather() sharing the same sandbox
@@ -16,7 +15,7 @@ import structlog
 
 from src.agent.events import AuditEvent, EventBus
 from src.agent.executor import _container_server_configs, _mcp_server_uploads
-from src.agent.schema import validate_phase3_result
+from src.agent.schema import validate_package_result
 from src.agent.subagent import run_package_subagent
 from src.agent.tool_catalog import build_tool_catalog_summary
 from src.config.loaders import load_from_file
@@ -58,7 +57,7 @@ async def run_all_packages(
     }, bus=event_bus)
     await _emit(progress_callback, "main_bootstrap", {"message": "starting_sandbox"}, bus=event_bus)
 
-    # One container for all packages — same as ptc-v4-dep-gap-agentic
+    # One container for all packages
     container_name = f"{config.docker.container_name}-{uuid4().hex[:8]}"
     sandbox = await asyncio.get_event_loop().run_in_executor(
         None, lambda: DockerSandbox(config.docker.image, container_name)
@@ -117,7 +116,7 @@ async def run_all_packages(
                 await _emit(progress_callback, "subagent_error", {
                     "package": package, "error": str(exc),
                 }, bus=event_bus)
-                return validate_phase3_result({
+                return validate_package_result({
                     "package": package,
                     "pinned_version": pinned,
                     "latest_version": None,

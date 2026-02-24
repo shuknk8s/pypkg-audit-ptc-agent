@@ -1,35 +1,16 @@
-import time
-
+"""Experiment-local Scorecard server with retry logic."""
 from mcp.server.fastmcp import FastMCP
-import httpx
+
+from experiments.template_codegen.mcp_servers.retry import get_with_retry
 
 mcp = FastMCP("scorecard")
-
-
-def _get_with_retry(url: str, *, max_retries: int = 3, backoff: int = 1, **kwargs) -> httpx.Response:
-    timeout = kwargs.pop("timeout", 15)
-    for attempt in range(max_retries):
-        try:
-            resp = httpx.get(url, timeout=timeout, **kwargs)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                if attempt < max_retries - 1:
-                    time.sleep(backoff * (attempt + 1))
-                    continue
-            resp.raise_for_status()
-            return resp
-        except (httpx.TimeoutException, httpx.ConnectError):
-            if attempt < max_retries - 1:
-                time.sleep(backoff * (attempt + 1))
-                continue
-            raise
-    raise httpx.HTTPError(f"Failed after {max_retries} retries")
 
 
 @mcp.tool()
 def get_security_scorecard(owner: str, repo: str) -> dict:
     """Get OpenSSF Security Scorecard for a GitHub repository."""
     try:
-        resp = _get_with_retry(
+        resp = get_with_retry(
             f"https://api.securityscorecards.dev/projects/github.com/{owner}/{repo}",
             timeout=15,
             follow_redirects=True,
@@ -46,6 +27,7 @@ def get_security_scorecard(owner: str, repo: str) -> dict:
         }
     except Exception as e:
         return {"repository": f"{owner}/{repo}", "overall_score": None, "checks": {}, "source": "scorecard", "error": str(e)}
+
 
 if __name__ == "__main__":
     mcp.run()

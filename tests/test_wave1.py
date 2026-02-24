@@ -1,4 +1,4 @@
-"""Wave 1 verification — zero LLM calls, all mocked."""
+"""Structural verification — step functions importable, AuditContext defaults, no agent framework."""
 import ast
 import pathlib
 from unittest.mock import AsyncMock, MagicMock
@@ -7,7 +7,7 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# T1 — create_agent is gone
+# T1 — no agent framework in subagent.py (direct llm.ainvoke only)
 # ---------------------------------------------------------------------------
 def test_no_create_agent():
     source = pathlib.Path("src/agent/subagent.py").read_text()
@@ -23,7 +23,7 @@ def test_step_functions_importable():
         step_codegen,
         step_execute_with_retry,
         step_compute_savings,
-        step_validate_phase2,
+        step_validate_findings,
         step_interpret_cves,
         step_analyze_changelog,
         step_finalize,
@@ -32,7 +32,7 @@ def test_step_functions_importable():
     assert callable(step_codegen)
     assert callable(step_execute_with_retry)
     assert callable(step_compute_savings)
-    assert callable(step_validate_phase2)
+    assert callable(step_validate_findings)
     assert callable(step_interpret_cves)
     assert callable(step_analyze_changelog)
     assert callable(step_finalize)
@@ -57,7 +57,7 @@ def test_audit_context():
     assert ctx.messages == []
     assert ctx.script_source == ""
     assert ctx.last_error == ""
-    assert ctx.phase2_data == {}
+    assert ctx.audit_data == {}
     assert ctx.token_savings == {}
     assert ctx.supplemental_calls == 0
 

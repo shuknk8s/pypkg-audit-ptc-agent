@@ -87,6 +87,7 @@ import os
 
 SERVER_CONFIGS = {literal}
 PROC_CACHE = {{}}
+TOOLS_CALLED = []  # tracks (server, tool) for every call_tool invocation
 
 
 def _cleanup() -> None:
@@ -149,7 +150,7 @@ def _get_server(server_name: str):
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
-            "params": {{"protocolVersion": "2024-11-05", "capabilities": {{}}, "clientInfo": {{"name": "ptc-v4", "version": "0.1"}}}},
+            "params": {{"protocolVersion": "2024-11-05", "capabilities": {{}}, "clientInfo": {{"name": "pypkg-audit-ptc-agent", "version": "0.1"}}}},
         }},
     )
     proc.stdin.write((json.dumps({{"jsonrpc": "2.0", "method": "initialized", "params": {{}}}}) + "\\n").encode())
@@ -158,7 +159,13 @@ def _get_server(server_name: str):
     return proc, 2
 
 
+def get_tools_called() -> list[str]:
+    """Return deduplicated list of servers that were actually called."""
+    return sorted(set(s for s, _ in TOOLS_CALLED))
+
+
 def call_tool(server_name: str, tool_name: str, arguments: dict | None = None) -> dict:
+    TOOLS_CALLED.append((server_name, tool_name))
     proc, req_id = _get_server(server_name)
     PROC_CACHE[server_name] = (proc, req_id + 1)
     payload = {{

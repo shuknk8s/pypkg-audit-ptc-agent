@@ -1,6 +1,6 @@
 # Token Savings Report — PTC + PTD vs Traditional ReAct
 
-**Generated:** 2026-02-22 21:28 UTC  
+**Generated:** 2026-02-24 00:52 UTC  
 **Architecture:** Programmatic Tool Calling (PTC) + Progressive Tool Discovery (PTD)  
 **Baseline:** Estimated traditional ReAct / function-calling loop
 
@@ -12,32 +12,27 @@ context window as prompt tokens. With PTC the LLM writes a Python script once; t
 runs inside a Docker sandbox, calls all tools, and returns only a compact JSON summary.
 The raw responses never enter the LLM context window.
 
-**PTD savings** — Previously the codegen prompt injected ~700 tokens of tool API docs on
-every call (markdown docs + hardcoded response shapes). With PTD Level 2 those docs are
-replaced by a shared `TOOL RESPONSE SHAPES` block in the system prompt (~200 tokens,
-paid once). Net saving: ~500 tokens per codegen call.
+**PTD savings** — Real progressive tool discovery: the core codegen prompt includes only
+a lightweight catalog of Phase B tools (~50 tokens). The LLM selects which tools it needs
+based on core audit data. Full schemas load ONLY for requested tools in a second codegen
+call. Clean packages skip Phase B entirely. Savings vary per package.
 
 ## Results
 
 | Package | Actual tokens (PTC+PTD) | Est. ReAct baseline | PTC saved (tool resp) | PTC % | PTD saved (doc inject) | PTD % | Combined saved % |
 |---------|------------------------|---------------------|-----------------------|-------|------------------------|-------|------------------|
-| requests | 3,383 | 9,511 | 5,428 | 57.1% | 500 | 5.3% | **62.3%** |
-| flask | 3,366 | 10,643 | 6,577 | 61.8% | 500 | 4.7% | **66.5%** |
-| django | 3,351 | 9,540 | 5,489 | 57.5% | 500 | 5.2% | **62.8%** |
-| urllib3 | 3,357 | 7,522 | 3,465 | 46.1% | 500 | 6.6% | **52.7%** |
-| jinja2 | 3,396 | 12,019 | 7,923 | 65.9% | 500 | 4.2% | **70.1%** |
-| pyyaml | 3,350 | 5,088 | 1,038 | 20.4% | 500 | 9.8% | **30.2%** |
-| **TOTAL** | **20,203** | **54,323** | **29,920** | **55.1%** | **3,000** | **5.5%** | **60.6%** |
+| requests | 4,266 | 9,484 | 4,878 | 51.4% | 120 | 1.3% | **52.7%** |
+| **TOTAL** | **4,266** | **9,484** | **4,878** | **51.4%** | **120** | **1.3%** | **52.7%** |
 
 ## Key numbers
 
-- **Combined token reduction:** 60.6% vs estimated ReAct baseline
-- **PTC contribution:** 55.1% — tool responses kept inside sandbox
-- **PTD contribution:** 5.5% — per-call doc injection eliminated
-- **Actual tokens spent:** 20,203 across 6 package(s)
-- **Estimated ReAct cost:** 54,323 tokens
-- **Total tokens saved:** 32,920
+- **Combined token reduction:** 52.7% vs estimated ReAct baseline
+- **PTC contribution:** 51.4% — tool responses kept inside sandbox
+- **PTD contribution:** 1.3% — per-call doc injection eliminated
+- **Actual tokens spent:** 4,266 across 1 package(s)
+- **Estimated ReAct cost:** 9,484 tokens
+- **Total tokens saved:** 4,998
 
 > **Estimation methodology:** ReAct baseline = actual PTC tokens + sandbox payload size ÷ 4
 > (chars-to-tokens approximation for raw tool responses that would have entered the LLM
-> context window) + 700 tokens for per-call doc injection that PTD eliminates.
+> context window) + 450 tokens for eager tool doc injection that PTD eliminates.

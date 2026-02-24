@@ -19,6 +19,10 @@ build/
 # Runtime output
 results/
 *.md.bak
+audit-debug.log
+token-savings-report.md
 
 # IDE
 .DS_Store
+.cursor/
+.claude/

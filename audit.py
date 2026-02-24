@@ -7,10 +7,14 @@ import asyncio
 import json
 import logging
 import os
+import sys
+
+# Prevent stale .pyc files from causing schema mismatches between
+# host-side MCP servers and Docker-side tool wrappers.
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4  # noqa: F401 — kept for _write_savings_markdown
-
 import structlog
 from rich import box
 from rich.console import Console, Group
@@ -22,12 +26,21 @@ from src.agent.pipeline import run_all_packages
 from src.agent.planner import parse_requirements_input
 from src.agent.synthesizer import synthesize_results
 
+_log_file = open("audit-debug.log", "w", encoding="utf-8")  # noqa: SIM115
 structlog.configure(
     processors=[
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.add_log_level,
         structlog.processors.JSONRenderer(),
-    ]
+    ],
+    logger_factory=structlog.WriteLoggerFactory(file=_log_file),
+)
+# Route stdlib logging (used by subagent.py) to the same file
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler(_log_file)],
+    force=True,
 )
 
 console = Console()
@@ -37,13 +50,13 @@ if os.getenv("LANGCHAIN_API_KEY"):
     try:
         from langchain.callbacks import LangChainTracer
 
-        _tracer = LangChainTracer(project_name="dep-audit-deepagent")
+        _tracer = LangChainTracer(project_name="pypkg-audit-ptc-agent")
     except Exception:
         pass
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Dependency-gap audit — LangGraph Deep Agents")
+    parser = argparse.ArgumentParser(description="Dependency-gap audit — PTC + PTD via Docker sandbox")
     parser.add_argument(
         "requirements_file",
         help="Requirements file with pinned entries (pkg==version)",
@@ -108,10 +121,10 @@ def _write_savings_markdown(
         "runs inside a Docker sandbox, calls all tools, and returns only a compact JSON summary.",
         "The raw responses never enter the LLM context window.",
         "",
-        "**PTD savings** — Previously the codegen prompt injected ~700 tokens of tool API docs on",
-        "every call (markdown docs + hardcoded response shapes). With PTD Level 2 those docs are",
-        "replaced by a shared `TOOL RESPONSE SHAPES` block in the system prompt (~200 tokens,",
-        "paid once). Net saving: ~500 tokens per codegen call.",
+        "**PTD savings** — Real progressive tool discovery: the core codegen prompt includes only",
+        "a lightweight catalog of Phase B tools (~50 tokens). The LLM selects which tools it needs",
+        "based on core audit data. Full schemas load ONLY for requested tools in a second codegen",
+        "call. Clean packages skip Phase B entirely. Savings vary per package.",
         "",
         "## Results",
         "",
@@ -150,7 +163,7 @@ def _write_savings_markdown(
         "",
         "> **Estimation methodology:** ReAct baseline = actual PTC tokens + sandbox payload size ÷ 4",
         "> (chars-to-tokens approximation for raw tool responses that would have entered the LLM",
-        "> context window) + 700 tokens for per-call doc injection that PTD eliminates.",
+        "> context window) + 450 tokens for eager tool doc injection that PTD eliminates.",
     ]
 
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -308,10 +321,67 @@ def _render_rich_output(result: dict) -> None:
             "flow back into the context window as prompt tokens. With PTC the LLM writes a Python "
             "script once; the script runs inside a Docker sandbox, calls all tools, and returns "
             "only a compact JSON summary. The raw responses never enter the LLM context window.\n\n"
-            "[dim]PTD savings[/dim] — Previously the codegen prompt injected ~700 tokens of tool "
-            "API docs on every call (markdown docs + hardcoded response shapes). With PTD Level 2 "
-            "those docs are replaced by a shared TOOL RESPONSE SHAPES block in the system prompt "
-            "(~200 tokens, paid once). Net saving: ~500 tokens per codegen call."
+            "[dim]PTD savings[/dim] — Real progressive tool discovery: the core codegen prompt "
+            "includes only a lightweight catalog of Phase B tools (~50 tokens of names + "
+            "descriptions). The LLM selects which tools it needs based on core audit data. "
+            "A second codegen call loads full schemas ONLY for the tools the LLM requested. "
+            "Clean packages skip Phase B entirely (0 extra schema tokens)."
+        )
+
+        # --- PTD Tool Selection Table ---
+        _CORE_TOOLS = {"nvd", "pypi", "github_api"}
+        _PHASE_B_TOOLS = ["epss", "osv", "deps_dev", "scorecard"]
+        _PHASE_B_CONDITIONS = {
+            "epss": "CVEs affecting > 0",
+            "osv": "CVEs affecting > 0",
+            "deps_dev": "versions_behind >= 3",
+            "scorecard": "GitHub repo found",
+        }
+
+        ptd_table = Table(
+            title="PTD — Progressive Tool Discovery (LLM-driven tool selection)",
+            box=box.ROUNDED,
+            show_lines=True,
+        )
+        ptd_table.add_column("Package", style="cyan")
+        ptd_table.add_column("CVEs\nAffecting", justify="right")
+        ptd_table.add_column("Total\nCVEs", justify="right")
+        ptd_table.add_column("Phase B\nSkipped?", justify="center")
+        ptd_table.add_column("Schemas\nLoaded", justify="center", style="yellow")
+        for tool in _PHASE_B_TOOLS:
+            ptd_table.add_column(f"{tool}", justify="center")
+        ptd_table.add_column("Runtime\nTotal", justify="right", style="bold")
+
+        for row in rows_with_savings:
+            pkg = row.get("package", "")
+            s = pkg_savings_map[pkg]
+            runtime = set(s.get("ptd_tools_runtime", []))
+            phase_b_loaded = set(s.get("ptd_phase_b_tools_loaded", []))
+            phase_b_skipped = s.get("ptd_phase_b_skipped", False)
+            cves_affecting = len(row.get("cves_affecting_pinned") or [])
+            total_cves = row.get("total_cves_found", 0)
+
+            cells = [
+                pkg,
+                str(cves_affecting),
+                str(total_cves),
+                "[green]YES[/green]" if phase_b_skipped else "[dim]no[/dim]",
+                str(len(phase_b_loaded)),
+            ]
+            for tool in _PHASE_B_TOOLS:
+                if tool in phase_b_loaded:
+                    cells.append("[green]YES[/green]")
+                else:
+                    cells.append("[dim]no[/dim]")
+            cells.append(str(len(runtime)))
+            ptd_table.add_row(*cells)
+
+        console.print(ptd_table)
+        console.print(
+            "\n[dim]PTD proof[/dim] — The LLM sees only a lightweight catalog of Phase B tools "
+            "(~50 tokens). After core audit, it outputs _tools_needed — the tools it wants for "
+            "deeper investigation. Full schemas load ONLY for requested tools. Clean packages "
+            "skip Phase B entirely (0 extra tokens). CVE-heavy packages load only what's needed."
         )
 
         _write_savings_markdown(
@@ -417,18 +487,24 @@ async def run(
             if pkg in pkg_state:
                 pkg_state[pkg]["status"] = "running"
                 pkg_state[pkg]["detail"] = f"pinned {payload.get('pinned_version')}"
-                pkg_state[pkg]["logs"].append("querying NVD + PyPI + GitHub")
+                pkg_state[pkg]["logs"].append("Phase A: querying nvd, pypi, github_api")
         elif event == "subagent_update":
             pkg = str(payload.get("package"))
             if pkg in pkg_state:
                 stage = str(payload.get("stage", "running"))
-                label = {
-                    "llm_codegen":        "generating audit script",
-                    "script_execution":   "executing in sandbox",
-                    "llm_interpretation": "interpreting CVEs",
-                    "llm_changelog":      "analysing changelog",
-                    "done":               "finalising result",
-                }.get(stage, stage.replace("_", " "))
+                phase_b_tools = payload.get("phase_b_tools", [])
+                if stage == "phase_b_execution" and phase_b_tools:
+                    label = f"Phase B: querying {', '.join(phase_b_tools)}"
+                else:
+                    label = {
+                        "llm_codegen":        "generating audit script",
+                        "script_execution":   "executing in sandbox",
+                        "llm_interpretation": "interpreting CVEs",
+                        "llm_changelog":      "analysing changelog",
+                        "phase_b_codegen":    "Phase B: selecting enrichment tools",
+                        "phase_b_skipped":    "Phase B: skipped (no tools needed)",
+                        "done":               "finalising result",
+                    }.get(stage, stage.replace("_", " "))
                 pkg_state[pkg]["status"] = "running"
                 pkg_state[pkg]["detail"] = label
                 pkg_state[pkg]["logs"].append(label)
