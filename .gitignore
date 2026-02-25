@@ -22,6 +22,9 @@ results/
 audit-debug.log
 token-savings-report.md
 
+# Experiments (standalone copy, fixes merged into src/)
+experiments/
+
 # IDE
 .DS_Store
 .cursor/

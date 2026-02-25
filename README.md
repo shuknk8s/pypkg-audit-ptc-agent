@@ -81,13 +81,16 @@ pyyaml==5.4.1
 
 For each package:
 
-- **CVE scan** via NVD with CPE range matching — classifies CVEs as `affecting_pinned`, `not_relevant`, or `needs_interpretation`
+- **CVE scan** via NVD with three-tier deterministic filtering:
+  1. CPE exact match — checks if pinned version is in the vulnerable range
+  2. CPE exclusion — filters out CVEs that NVD tied to other products (e.g., Xen FLASK != Python Flask)
+  3. Summary version parsing — extracts version ranges from CVE descriptions
 - **Version gap** — current vs latest, how many versions behind
 - **Changelog analysis** — breaking changes detection from GitHub release notes
-- **Risk rating** — deterministic (critical/high/medium/low) based on CVE severity distribution
+- **Risk rating** — LLM-assessed (critical/high/medium/low) using CVE severity context and few-shot examples, with deterministic fallback
 - **Upgrade recommendation** with rationale
 
-Ambiguous CVEs are sent to the LLM for interpretation. Risk ratings are computed deterministically — not by the LLM.
+Only CVEs with no CPE data and no parseable version range reach the LLM for interpretation.
 
 ## MCP Servers
 
@@ -95,7 +98,7 @@ Ambiguous CVEs are sent to the LLM for interpretation. Risk ratings are computed
 
 | Server | Phase | Data Source |
 |--------|-------|-------------|
-| `nvd` | Core | NVD CVE API with CPE range matching |
+| `nvd` | Core | NVD CVE API with three-tier deterministic filtering |
 | `pypi` | Core | PyPI package metadata |
 | `github_api` | Core | GitHub release notes |
 | `epss` | B | FIRST EPSS exploit probability scores |

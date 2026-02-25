@@ -117,7 +117,7 @@ pypkg-audit-ptc-agent/
 │   │   └── tool_generator.py   # Generates sandbox-side wrappers, docs, and mcp_client.py
 │   │
 │   ├── mcp_servers/            # 8 FastMCP server implementations
-│   │   ├── nvd.py              # NVD CVE API with CPE range matching
+│   │   ├── nvd.py              # NVD CVE API with three-tier filtering (CPE match, CPE exclusion, summary parsing)
 │   │   ├── pypi.py             # PyPI metadata (latest version, GitHub repo)
 │   │   ├── github_api.py       # GitHub release notes
 │   │   ├── epss.py             # FIRST EPSS exploit probability scores
@@ -234,7 +234,7 @@ The same `.py` server files are uploaded to `/app/mcp_servers/` in the container
 
 ### Per-Package Subagent Pipeline
 
-Each package runs through these steps sequentially (packages run in parallel via `asyncio.gather`):
+Each package runs through 9 steps sequentially (packages run in parallel via `asyncio.gather`):
 
 ```mermaid
 flowchart TD
@@ -246,21 +246,24 @@ flowchart TD
     E --> F
     F --> G["step_validate_findings\n(Pydantic validation)"]
     G --> H["step_interpret_cves\n(LLM classifies ambiguous CVEs)"]
-    H --> I["step_analyze_changelog\n(LLM analyzes upgrade risk)"]
-    I --> J["step_finalize\n(deterministic narrative + Phase3 validation)"]
+    H --> I["step_analyze_changelog\n(LLM analyzes upgrade risk + risk rating)"]
+    I --> J["step_finalize\n(narrative + Phase3 validation)"]
 ```
 
 ### CVE Classification
 
-CVEs from NVD are pre-classified by the `search_cves` MCP tool:
+CVEs from NVD keyword search are pre-classified by the `search_cves` MCP tool through three deterministic tiers before any LLM involvement:
 
-| Status | Method | Meaning |
-|--------|--------|---------|
-| `affecting_pinned` | `cpe_range` | CPE version range confirms the CVE affects the pinned version |
-| `not_relevant` | `cpe_range` | CPE range confirms the pinned version is outside the affected range |
-| `needs_interpretation` | `heuristic` | Keyword match only, no CPE confirmation — sent to LLM for classification |
+| Tier | Method | Logic | Result |
+|------|--------|-------|--------|
+| 1. CPE exact match | `cpe_range` | Extract CPE product field (parts[4]), check `_is_in_range()` against pinned version | `affecting_pinned` or `not_relevant` |
+| 2. CPE exclusion | `heuristic` | CVE has CPE data for other products but NOT ours — NVD tied this CVE to different software | `not_relevant` |
+| 3. Summary parsing | `summary_version` | Parse version ranges from CVE description ("before X", "prior to X", etc.) | `affecting_pinned` or `not_relevant` |
+| 4. Fallback | `heuristic` | No CPE data, no parseable version — keyword match only | `needs_interpretation` |
 
-The LLM interpretation step reclassifies `needs_interpretation` CVEs as either `affecting_pinned` or `not_relevant` with `determination_method: "agent_interpretation"`.
+Only Tier 4 CVEs reach the LLM interpretation step, which reclassifies them as `affecting_pinned` or `not_relevant` with `determination_method: "agent_interpretation"`.
+
+**CPE exclusion** (Tier 2) is critical for accuracy. NVD keyword search for "flask" returns CVEs about Xen FLASK, Flask-CORS, Flask-AppBuilder, etc. These CVEs have CPE data pointing to those other products. Since NVD explicitly tied the CVE to other software (not our package), they are deterministically filtered out. This eliminated ~100 false `needs_interpretation` CVEs across the 6-package test suite.
 
 ### Output Schema
 
@@ -285,7 +288,7 @@ Each package produces a `PackageAuditResult`:
 }
 ```
 
-Risk rating is computed deterministically from CVE counts and severity distribution — not by the LLM.
+Risk rating is assessed by the LLM using CVE context (severity breakdown, determination methods, versions behind) with few-shot examples in the changelog analysis prompt. A deterministic fallback formula is used if the LLM response is missing or invalid.
 
 ### Docker Sandbox
 

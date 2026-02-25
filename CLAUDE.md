@@ -28,7 +28,7 @@ Tool loading is two-phase. **Phase A** always runs with 3 core tools (nvd, pypi,
 
 ### Execution Flow
 1. `audit.py` → `pipeline.py`: parse requirements, start one shared Docker container, connect to MCP servers, generate tool wrappers, upload to container
-2. Per-package (parallel via `asyncio.gather`): 7 sequential step functions in `subagent.py` mutate an `AuditContext` dataclass — codegen → execute with retry → Phase B selection → Phase B execute → validate → interpret CVEs → changelog → finalize
+2. Per-package (parallel via `asyncio.gather`): 9 sequential step functions in `subagent.py` mutate an `AuditContext` dataclass — codegen → execute with retry → Phase B codegen → Phase B execute → compute savings → validate findings → interpret CVEs → analyze changelog → finalize
 3. Synthesis: deterministic cross-package report, Rich terminal UI, markdown savings report
 
 ### MCP Server Architecture
@@ -36,11 +36,18 @@ Tool loading is two-phase. **Phase A** always runs with 3 core tools (nvd, pypi,
 - **Container side**: Generated `mcp_client.py` spawns MCP servers as subprocesses on first tool call; server configs rewritten from `uv run python -m ...` (host) to `python3 /app/mcp_servers/<name>.py` (container)
 - Servers are FastMCP implementations in `src/mcp_servers/`
 
+### NVD CVE Classification (three-tier deterministic filtering)
+The `search_cves` tool in `src/mcp_servers/nvd.py` classifies CVEs before they reach the LLM:
+1. **CPE exact match** (`cpe_range`): extracts CPE product field (parts[4]) and checks version range via `_is_in_range()` → `affecting_pinned` or `not_relevant`
+2. **CPE exclusion** (`heuristic`): if a CVE has CPE data for other products but NOT ours → `not_relevant` (eliminates false positives like Xen FLASK CVEs appearing in Flask results)
+3. **Summary version parsing** (`summary_version`): parses version ranges from CVE description text ("before X", "prior to X", etc.) → `affecting_pinned` or `not_relevant`
+4. Only CVEs with no CPE data at all and no parseable version in summary remain as `needs_interpretation` → sent to LLM
+
 ### Key Patterns
-- **Step functions** (not an agent framework): `subagent.py` has independent async functions, no ReAct loop
+- **Step functions** (not an agent framework): `subagent.py` has 9 independent async functions, no ReAct loop
 - **Code extraction**: LLM output in \`\`\`python fences, extracted via regex
 - **MCP envelope decoding**: scripts must unwrap `response["content"][0]["text"]` from every tool call
-- **Deterministic risk rating**: computed from CVE severity counts, no LLM involved
+- **LLM risk rating**: assessed by LLM using CVE severity context and few-shot examples, with deterministic fallback
 - **Token savings accounting**: PTC savings = raw response chars / 4; PTD savings = (4 - loaded_count) * 85 - 50
 
 ## Configuration
