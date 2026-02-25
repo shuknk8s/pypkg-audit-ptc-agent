@@ -64,10 +64,6 @@ async def _generate_phase_a(package: str, version: str) -> str:
     return response.content
 
 
-# ---------------------------------------------------------------------------
-# Structural checks on the generated code
-# ---------------------------------------------------------------------------
-
 def _assert_valid_python(code: str):
     """Must parse as valid Python."""
     try:
@@ -126,10 +122,6 @@ def _assert_no_hardcoded_results(code: str, package: str, version: str):
     assert "search_cves(" in code, "Missing search_cves() call"
     assert "get_package_metadata(" in code, "Missing get_package_metadata() call"
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_phase_a_codegen_requests():

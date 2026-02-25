@@ -87,7 +87,7 @@ import os
 
 SERVER_CONFIGS = {literal}
 PROC_CACHE = {{}}
-TOOLS_CALLED = []  # tracks (server, tool) for every call_tool invocation
+TOOLS_CALLED = []
 
 
 def _cleanup() -> None:

@@ -11,9 +11,6 @@ import pytest
 from src.agent.events import AuditEvent, EventBus
 
 
-# ---------------------------------------------------------------------------
-# T1 -- Single subscriber receives all events in order
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_single_subscriber_ordering():
     bus = EventBus()
@@ -35,9 +32,6 @@ async def test_single_subscriber_ordering():
     assert [r.data["i"] for r in received] == [0, 1, 2, 3, 4]
 
 
-# ---------------------------------------------------------------------------
-# T2 -- Multiple subscribers each get every event (fan-out)
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_fanout_multiple_subscribers():
     bus = EventBus()
@@ -53,9 +47,6 @@ async def test_fanout_multiple_subscribers():
         assert second.event_type == "beta"
 
 
-# ---------------------------------------------------------------------------
-# T3 -- AuditEvent.to_sse() produces spec-compliant SSE format
-# ---------------------------------------------------------------------------
 def test_to_sse_format():
     evt = AuditEvent(
         event_type="codegen_start",
@@ -65,24 +56,18 @@ def test_to_sse_format():
     )
     sse = evt.to_sse()
 
-    # Must start with "data: " and end with "\n\n"
     assert sse.startswith("data: ")
     assert sse.endswith("\n\n")
 
-    # Middle is valid JSON
     payload_str = sse[len("data: "):-2]
     payload = json.loads(payload_str)
 
     assert payload["event_type"] == "codegen_start"
     assert payload["package"] == "requests"
     assert payload["timestamp"] == 1700000000.0
-    # Nested data dict survives round-trip
     assert payload["data"] == {"stage": "codegen"}
 
 
-# ---------------------------------------------------------------------------
-# T4 -- SSE stream simulation (end-to-end SSE contract)
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_sse_stream_end_to_end():
     bus = EventBus()
@@ -98,16 +83,13 @@ async def test_sse_stream_end_to_end():
     for et in lifecycle:
         await bus.emit(AuditEvent(event_type=et, package="flask", data={"stage": et}))
 
-    # Collect SSE lines
     sse_chunks = []
     for _ in range(5):
         evt = await sub.__anext__()
         sse_chunks.append(evt.to_sse())
 
-    # Concatenate into one SSE stream
     stream = "".join(sse_chunks)
 
-    # Parse back: split on double-newline, drop empty trailing element
     raw_parts = stream.split("\n\n")
     raw_parts = [p for p in raw_parts if p.strip()]
     assert len(raw_parts) == 5
@@ -121,15 +103,11 @@ async def test_sse_stream_end_to_end():
     assert [r["event_type"] for r in recovered] == lifecycle
     assert all(r["package"] == "flask" for r in recovered)
 
-    # Each chunk conforms to EventSource format: "data: {json}\n\n"
     for chunk in sse_chunks:
         assert chunk.startswith("data: ")
         assert chunk.endswith("\n\n")
 
 
-# ---------------------------------------------------------------------------
-# T5 -- Subscriber cleanup on disconnect
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_subscriber_cleanup_on_close():
     bus = EventBus()
@@ -137,26 +115,19 @@ async def test_subscriber_cleanup_on_close():
 
     assert len(bus._subscribers) == 1
 
-    # Consume two events
     await bus.emit(AuditEvent(event_type="a", package="p"))
     await bus.emit(AuditEvent(event_type="b", package="p"))
     await sub.__anext__()
     await sub.__anext__()
 
-    # Close the async iterator -- triggers finally block that removes the queue
     await sub.aclose()
 
     assert len(bus._subscribers) == 0
 
-    # Emitting after disconnect should not error
     await bus.emit(AuditEvent(event_type="c", package="p"))
 
 
-# ---------------------------------------------------------------------------
-# T6 -- EventBus with no subscribers does not error
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_emit_with_no_subscribers():
     bus = EventBus()
-    # Should not raise
     await bus.emit(AuditEvent(event_type="orphan", package="none"))

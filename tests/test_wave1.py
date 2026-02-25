@@ -6,18 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# T1 — no agent framework in subagent.py (direct llm.ainvoke only)
-# ---------------------------------------------------------------------------
 def test_no_create_agent():
     source = pathlib.Path("src/agent/subagent.py").read_text()
     assert "create_agent" not in source
     assert "from langchain.agents" not in source
 
 
-# ---------------------------------------------------------------------------
-# T2 — Step functions are importable
-# ---------------------------------------------------------------------------
 def test_step_functions_importable():
     from src.agent.subagent import (
         step_codegen,
@@ -28,7 +22,6 @@ def test_step_functions_importable():
         step_analyze_changelog,
         step_finalize,
     )
-    # All should be callable
     assert callable(step_codegen)
     assert callable(step_execute_with_retry)
     assert callable(step_compute_savings)
@@ -38,9 +31,6 @@ def test_step_functions_importable():
     assert callable(step_finalize)
 
 
-# ---------------------------------------------------------------------------
-# T3 — AuditContext is importable with correct fields
-# ---------------------------------------------------------------------------
 def test_audit_context():
     from src.agent.schema import AuditContext
 
@@ -62,22 +52,17 @@ def test_audit_context():
     assert ctx.supplemental_calls == 0
 
 
-# ---------------------------------------------------------------------------
-# T4 — Retry logic works (mock sandbox)
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_step_execute_with_retry():
     from src.agent.schema import AuditContext
     from src.agent.subagent import step_codegen, step_execute_with_retry
 
-    # Mock LLM that returns a code-fenced script
     mock_llm = AsyncMock()
     mock_response = MagicMock()
     mock_response.content = '```python\nprint("hello")\n```'
     mock_response.usage_metadata = {"input_tokens": 10, "output_tokens": 5}
     mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
-    # Mock sandbox: first call fails, second succeeds
     mock_sandbox = AsyncMock()
     fail_result = MagicMock()
     fail_result.exit_code = 1
@@ -98,23 +83,15 @@ async def test_step_execute_with_retry():
         tool_catalog_summary="tools here",
     )
 
-    # Run codegen first to populate messages and script_source
     await step_codegen(ctx)
-
-    # Now run execute with retry
     await step_execute_with_retry(ctx)
 
     assert ctx.parsed_output is not None
     assert ctx.parsed_output["package"] == "test"
-    # attempt should be 1 (the second iteration, 0-indexed)
     assert ctx.attempt == 1
-    # sandbox.aexecute should have been called twice
     assert mock_sandbox.aexecute.call_count == 2
 
 
-# ---------------------------------------------------------------------------
-# T5 — langgraph is not in dependencies
-# ---------------------------------------------------------------------------
 def test_no_langgraph_dep():
     toml = pathlib.Path("pyproject.toml").read_text()
     assert "langgraph" not in toml

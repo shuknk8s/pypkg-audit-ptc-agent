@@ -276,10 +276,6 @@ def _track_tokens(ctx: AuditContext, msg: AIMessage) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Step functions — each mutates AuditContext in place
-# ---------------------------------------------------------------------------
-
 async def step_codegen(ctx: AuditContext) -> None:
     """Step 1: LLM generates a Python script for the package audit."""
     system_msg = SystemMessage(content=build_system_prompt(ctx.tool_catalog_summary))
@@ -731,10 +727,6 @@ def step_finalize(ctx: AuditContext) -> dict:
     result["_token_savings"] = ctx.token_savings
     return result
 
-
-# ---------------------------------------------------------------------------
-# Public entry point + inner orchestrator
-# ---------------------------------------------------------------------------
 
 async def run_package_subagent(
     *,

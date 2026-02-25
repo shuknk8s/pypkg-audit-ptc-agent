@@ -80,10 +80,6 @@ class DockerSandbox(SandboxBackendProtocol):
              "mkdir -p /app/tools /app/tools/docs /app/code /app/results /app/mcp_servers"]
         )
 
-    # ------------------------------------------------------------------
-    # SandboxBackendProtocol — required
-    # ------------------------------------------------------------------
-
     @property
     def id(self) -> str:
         return self._sandbox_id
@@ -147,10 +143,6 @@ class DockerSandbox(SandboxBackendProtocol):
         output, truncated = self._summarize(output)
         return ExecuteResponse(output=output, exit_code=exit_code, truncated=truncated)
 
-
-    # ------------------------------------------------------------------
-    # BackendProtocol filesystem — all operations via Docker API
-    # ------------------------------------------------------------------
 
     def _abs(self, path: str) -> str:
         if not path or path == ".":
@@ -285,10 +277,6 @@ class DockerSandbox(SandboxBackendProtocol):
 
     async def adownload_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         return await asyncio.to_thread(self.download_files, paths)
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     def stop(self) -> None:
         if self.container is None:
