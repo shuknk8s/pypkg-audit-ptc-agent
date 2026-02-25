@@ -77,37 +77,18 @@ def _apply_structured_narrative(audit_data: dict, package: str, pinned_version: 
     joined = " ".join(notes).lower()
     breaking = any(hint in joined for hint in _BREAKING_HINTS)
 
-    # Use LLM risk rating if available, otherwise fall back to deterministic formula
-    llm_risk = audit_data.pop("_llm_risk_rating", None)
-
     if total_affecting == 0:
-        deterministic_rating = "low"
+        risk_rating = "low"
         action = "Routine patch cycle is acceptable; keep monitoring advisories."
     elif high_like >= 2:
-        deterministic_rating = "high"
+        risk_rating = "high"
         action = "Treat as priority remediation with staged rollout and targeted regression testing."
     elif high_like == 1:
-        deterministic_rating = "medium"
+        risk_rating = "medium"
         action = "Schedule near-term upgrade and validate critical paths before production rollout."
     else:
-        deterministic_rating = "low"
+        risk_rating = "low"
         action = "Upgrade in next maintenance window with standard validation."
-
-    if llm_risk:
-        risk_rating = llm_risk
-        # Update action if LLM rating differs significantly
-        if llm_risk == "critical":
-            action = "Treat as priority remediation with staged rollout and targeted regression testing."
-        elif llm_risk == "high" and deterministic_rating in ("low", "medium"):
-            action = "Treat as priority remediation with staged rollout and targeted regression testing."
-        elif llm_risk == "low" and deterministic_rating in ("high", "critical"):
-            action = "Upgrade in next maintenance window with standard validation."
-        logger.info(
-            "Risk rating for %s: LLM=%s, deterministic=%s (used LLM)",
-            package, llm_risk, deterministic_rating,
-        )
-    else:
-        risk_rating = deterministic_rating
 
     if total_affecting > 0:
         exposure_line = (
@@ -654,20 +635,9 @@ async def step_interpret_cves(ctx: AuditContext) -> None:
 
 
 async def step_analyze_changelog(ctx: AuditContext) -> None:
-    """LLM changelog analysis + risk rating."""
+    """LLM changelog analysis."""
     latest_version = ctx.audit_data.get("latest_version") or "latest"
     changelog_data = ctx.audit_data.get("changelog", {})
-
-    # Build CVE summary for risk rating context
-    affecting = ctx.audit_data.get("cves_affecting_pinned") or []
-    severity_counts = Counter(str(c.get("severity", "unknown")).lower() for c in affecting)
-    method_counts = Counter(str(c.get("determination_method", "unknown")).lower() for c in affecting)
-    cve_summary = {
-        "total_affecting": len(affecting),
-        "severity_breakdown": ", ".join(f"{v} {k}" for k, v in severity_counts.most_common()) or "none",
-        "determination_methods": ", ".join(f"{v} {k}" for k, v in method_counts.most_common()) or "none",
-        "versions_behind": ctx.audit_data.get("versions_behind", 0),
-    }
 
     if ctx.supplemental_calls < MAX_SUPPLEMENTAL_CALLS:
         ctx.supplemental_calls += 1
@@ -679,10 +649,7 @@ async def step_analyze_changelog(ctx: AuditContext) -> None:
                 ),
             )
             cl_msg = HumanMessage(
-                content=build_changelog_prompt(
-                    ctx.package, ctx.pinned_version, latest_version, changelog_data,
-                    cve_summary=cve_summary,
-                )
+                content=build_changelog_prompt(ctx.package, ctx.pinned_version, latest_version, changelog_data)
             )
             cl_response = await ctx.llm.ainvoke([analyst_system_msg, cl_msg])
             _track_tokens(ctx, cl_response)
@@ -694,15 +661,6 @@ async def step_analyze_changelog(ctx: AuditContext) -> None:
                 ctx.audit_data["recommendation_rationale"] = cl_parsed.get(
                     "recommendation_rationale", "LLM-based changelog analysis completed."
                 )
-                # LLM risk rating — validate and store
-                llm_risk = str(cl_parsed.get("risk_rating", "")).lower().strip()
-                if llm_risk in ("low", "medium", "high", "critical"):
-                    ctx.audit_data["_llm_risk_rating"] = llm_risk
-                    logger.info(
-                        "LLM risk rating for %s: %s (affecting=%d, severity=%s)",
-                        ctx.package, llm_risk, len(affecting),
-                        severity_counts.most_common(),
-                    )
             else:
                 raise ValueError("Non-dict changelog response")
         except Exception as cl_exc:

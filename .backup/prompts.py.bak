@@ -302,7 +302,6 @@ def build_changelog_prompt(
     pinned_version: str,
     latest_version: str,
     changelog: dict,
-    cve_summary: dict | None = None,
 ) -> str:
     notes = changelog.get("notes", []) if isinstance(changelog, dict) else []
     error = changelog.get("error") if isinstance(changelog, dict) else None
@@ -313,44 +312,18 @@ def build_changelog_prompt(
     else:
         changelog_summary = json.dumps(notes[:5], indent=2, ensure_ascii=False)[:3000]
 
-    # Build CVE context for risk rating
-    cve_block = ""
-    if cve_summary:
-        cve_block = dedent(f"""\
-
-        CVE summary for risk assessment:
-        - Total affecting CVEs: {cve_summary.get('total_affecting', 0)}
-        - Severity breakdown: {cve_summary.get('severity_breakdown', 'unknown')}
-        - Determination methods: {cve_summary.get('determination_methods', 'unknown')}
-        - Versions behind: {cve_summary.get('versions_behind', 'unknown')}
-        """)
-
     return dedent(f"""\
         Analyze the upgrade path from **{package_name} {pinned_version}** to **{latest_version}** \
-        for breaking changes, upgrade risk, and overall security risk rating.
+        for breaking changes and upgrade risk.
 
         Release notes / changelog excerpts:
         {changelog_summary}
-        {cve_block}
-        Based on ALL the data above, return ONLY a valid JSON object:
+
+        Based on the data available (or lack thereof), return ONLY a valid JSON object:
         {{
           "breaking_changes_detected": true | false,
           "changelog_analysis": "<1-3 sentence analysis of what the notes reveal, or state that no notes were available>",
-          "recommendation_rationale": "<concise upgrade rationale based on available evidence>",
-          "risk_rating": "low | medium | high | critical"
+          "recommendation_rationale": "<concise upgrade rationale based on available evidence>"
         }}
-
-        RISK RATING GUIDELINES with examples:
-        - "critical": multiple critical/high severity CVEs with confirmed exploits or RCE potential
-          Example: 5 affecting CVEs (3 critical, 2 high) in a web-facing library → "critical"
-        - "high": several confirmed affecting CVEs with high severity, or many medium CVEs
-          Example: 43 affecting CVEs (3 high, 38 medium) in a web framework → "high"
-        - "medium": a small number of affecting CVEs (1-3), mostly medium/low severity
-          Example: 3 affecting CVEs (all medium) in a template engine → "medium"
-        - "low": zero affecting CVEs, or only low-severity issues with no practical impact
-          Example: 0 affecting CVEs out of 50 scanned (all about other products) → "low"
-
-        Consider the FULL context: CVE count AND severity, the type of library (web-facing vs CLI tool), \
-        whether breaking changes exist in the upgrade path, and how far behind the pinned version is.
 
         Do NOT wrap the JSON in markdown fences. Return raw JSON only.""")
