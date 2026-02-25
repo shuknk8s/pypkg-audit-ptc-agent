@@ -168,13 +168,17 @@ def search_cves(package: str, version: str | None = None) -> dict:
                     break
             status = "needs_interpretation"
             matched_cpe = False
+            has_any_cpe = False
             cfgs = cve.get("configurations", [])
             for cfg in cfgs if isinstance(cfgs, list) else []:
                 nodes = cfg.get("nodes", [])
                 for node in nodes if isinstance(nodes, list) else []:
                     for match in node.get("cpeMatch", []) if isinstance(node.get("cpeMatch", []), list) else []:
+                        has_any_cpe = True
                         criteria = str(match.get("criteria") or "").lower()
-                        if package.lower() in criteria:
+                        parts = criteria.split(":")
+                        cpe_product = parts[4] if len(parts) > 4 else ""
+                        if cpe_product == package.lower():
                             matched_cpe = True
                             if version and _is_in_range(version, match):
                                 status = "affecting_pinned"
@@ -182,16 +186,22 @@ def search_cves(package: str, version: str | None = None) -> dict:
                                 status = "not_relevant"
                             else:
                                 status = "needs_interpretation"
+            cpe_excluded = False
             if not matched_cpe:
-                # fallback heuristic for keyword-only matches
-                lower_summary = summary.lower()
-                if package.lower() not in lower_summary:
+                if has_any_cpe:
+                    # CVE has CPE data for other products but not ours —
+                    # NVD explicitly tied this CVE to other software.
                     status = "not_relevant"
-                elif version:
-                    # Try to parse version ranges from summary text
-                    summary_status = _check_summary_version(package, version, summary)
-                    if summary_status is not None:
-                        status = summary_status
+                    cpe_excluded = True
+                else:
+                    # No CPE data at all — fall back to summary heuristics
+                    lower_summary = summary.lower()
+                    if package.lower() not in lower_summary:
+                        status = "not_relevant"
+                    elif version:
+                        summary_status = _check_summary_version(package, version, summary)
+                        if summary_status is not None:
+                            status = summary_status
             results.append(
                 {
                     "cve_id": _clean_text(cve_id),
@@ -201,7 +211,7 @@ def search_cves(package: str, version: str | None = None) -> dict:
                     "status": status,
                     "determination_method": (
                         "cpe_range" if matched_cpe and status in {"affecting_pinned", "not_relevant"}
-                        else "summary_version" if not matched_cpe and status in {"affecting_pinned", "not_relevant"} and package.lower() in summary.lower()
+                        else "summary_version" if not matched_cpe and not cpe_excluded and status in {"affecting_pinned", "not_relevant"} and package.lower() in summary.lower()
                         else "heuristic"
                     ),
                 }
