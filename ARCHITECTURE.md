@@ -1,10 +1,42 @@
 # Architecture
 
-A Python dependency security auditor that uses **Programmatic Tool Calling (PTC)** and **Progressive Tool Discovery (PTD)** to minimize LLM token usage while producing accurate vulnerability assessments.
+A Python dependency security auditor built on two **MCP-based context engineering patterns** — techniques for controlling what enters the LLM context window when agents use tools.
 
 ## Core Idea
 
-Instead of a traditional ReAct loop where every tool call round-trips through the LLM, the LLM writes a Python script once. That script runs inside a Docker sandbox, calls all MCP tools directly, and returns a compact JSON summary. Raw tool responses never enter the LLM context window.
+This system replaces the traditional ReAct loop (reason-act-observe cycles where the LLM calls one tool at a time) with two complementary patterns:
+
+- **Programmatic Tool Calling (PTC)** — the LLM writes a Python script instead of making individual tool calls. The script runs inside a Docker sandbox, calls MCP tools directly, and returns only a compact JSON summary. Raw tool responses never enter the LLM context window.
+- **Progressive Tool Discovery (PTD)** — tool schemas load in two phases. Phase A always includes 3 core tools plus a lightweight ~50-token catalog describing 4 Phase B tools. The LLM selects which Phase B tools it needs; full schemas load only for those. Clean packages skip Phase B entirely.
+
+## Why MCP?
+
+[MCP (Model Context Protocol)](https://modelcontextprotocol.io) provides the standardized tool interface that makes PTC possible. Each tool is an MCP server with a discoverable JSON schema. The host discovers schemas once, generates Python wrappers, and uploads them to the Docker sandbox. The LLM-generated scripts call these wrappers, which communicate with MCP servers via JSON-RPC over stdio — the same protocol on host and in the container. Without a standard tool interface, the code-generation approach would require per-tool glue code.
+
+## PTC vs ReAct
+
+```mermaid
+flowchart LR
+    subgraph ReAct["ReAct (traditional)"]
+        direction TB
+        R1["LLM"] -->|"call tool₁"| T1["Tool₁"]
+        T1 -->|"full response"| R2["LLM"]
+        R2 -->|"call tool₂"| T2["Tool₂"]
+        T2 -->|"full response"| R3["LLM"]
+        R3 -->|"call tool₃"| T3["Tool₃"]
+        T3 -->|"full response"| R4["LLM"]
+    end
+
+    subgraph PTC["PTC (this project)"]
+        direction TB
+        P1["LLM"] -->|"generates script"| S["Docker Sandbox"]
+        S -->|"calls tools directly"| MT["MCP Tools"]
+        MT -->|"raw responses stay"| S
+        S -->|"compact JSON only"| P2["LLM"]
+    end
+```
+
+ReAct: N tool calls = N round-trips, all raw responses in context. PTC: 1 codegen call, raw responses stay in sandbox.
 
 ## System Overview
 
@@ -102,7 +134,7 @@ pypkg-audit-ptc-agent/
 ├── src/
 │   ├── agent/
 │   │   ├── pipeline.py         # Top-level orchestrator (shared sandbox, parallel dispatch)
-│   │   ├── subagent.py         # Per-package step functions (codegen → execute → interpret)
+│   │   ├── subagent.py         # Per-package 9 step functions (codegen → execute → phase B → savings → validate → interpret → changelog → finalize)
 │   │   ├── prompts.py          # All LLM prompts (Phase A, Phase B, interpretation, changelog)
 │   │   ├── schema.py           # AuditContext dataclass, Pydantic models (CVEEntry, AuditFindings/PackageAuditResult)
 │   │   ├── llm.py              # ChatOpenAI factory
@@ -116,7 +148,7 @@ pypkg-audit-ptc-agent/
 │   │   ├── mcp_registry.py     # Connects to MCP servers, discovers tool schemas
 │   │   └── tool_generator.py   # Generates sandbox-side wrappers, docs, and mcp_client.py
 │   │
-│   ├── mcp_servers/            # 8 FastMCP server implementations
+│   ├── mcp_servers/            # 7 FastMCP server implementations
 │   │   ├── nvd.py              # NVD CVE API with three-tier filtering (CPE match, CPE exclusion, summary parsing)
 │   │   ├── pypi.py             # PyPI metadata (latest version, GitHub repo)
 │   │   ├── github_api.py       # GitHub release notes
@@ -247,7 +279,7 @@ flowchart TD
     F --> G["step_validate_findings\n(Pydantic validation)"]
     G --> H["step_interpret_cves\n(LLM classifies ambiguous CVEs)"]
     H --> I["step_analyze_changelog\n(LLM analyzes upgrade risk + risk rating)"]
-    I --> J["step_finalize\n(narrative + Phase3 validation)"]
+    I --> J["step_finalize\n(narrative + final validation)"]
 ```
 
 ### CVE Classification

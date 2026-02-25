@@ -1,33 +1,37 @@
 # pypkg-audit-ptc-agent
 
-A Python package security auditor that uses **Programmatic Tool Calling (PTC)** and **Progressive Tool Discovery (PTD)** to minimize LLM token usage while producing accurate vulnerability assessments.
+A Python package security auditor that demonstrates two **MCP-based context engineering patterns** — techniques for controlling what enters the LLM context window when agents use tools.
 
-Instead of a traditional ReAct loop where every tool call round-trips through the LLM, the LLM writes a Python script once. That script runs inside a Docker sandbox, calls MCP tools directly, and returns a compact JSON summary. Raw tool responses never enter the LLM context window.
+Traditional agent architectures use a **ReAct loop** (reason-act-observe cycles where the LLM calls one tool at a time and every response flows back into the prompt). This project replaces that pattern with two alternatives built on top of [MCP (Model Context Protocol)](https://modelcontextprotocol.io), the open standard for connecting LLMs to external tools:
+
+- **Programmatic Tool Calling (PTC)** — the LLM writes a Python script instead of making individual tool calls. The script runs inside a Docker sandbox, calls MCP tools directly, and returns only a compact JSON summary. Raw tool responses never enter the LLM context window.
+- **Progressive Tool Discovery (PTD)** — tool schemas load on demand. The LLM first sees a lightweight catalog (~50 tokens) describing available Phase B tools, then selects which ones it needs. Full schemas load only for requested tools. Clean packages skip Phase B entirely (0 extra schema tokens).
 
 ## How It Works
 
+### PTC: code generation replaces round-trips
+
+In a ReAct loop, N tool calls means N round-trips through the LLM — each raw response enters the context window as prompt tokens. PTC replaces this with a single code-generation call:
+
 ```
-requirements.txt ──> audit.py ──> LLM writes Python script
-                                        │
-                                        ▼
-                                  Docker Sandbox
-                                  ┌─────────────────┐
-                                  │ Generated script │
-                                  │ calls MCP tools: │
-                                  │  - NVD (CVEs)    │
-                                  │  - PyPI (versions)│
-                                  │  - GitHub (notes) │
-                                  └────────┬─────────┘
-                                           │
-                                    compact JSON only
-                                           │
-                                           ▼
-                                  Risk assessment + report
+ReAct (traditional):        PTC (this project):
+LLM → tool₁ → LLM          LLM → generates Python script
+LLM → tool₂ → LLM                    │
+LLM → tool₃ → LLM            Docker Sandbox
+  ...N round-trips            ┌───────────────────┐
+  all responses in context    │ script calls tools │
+                              │ MCP servers reply  │
+                              │ raw data stays here│
+                              └────────┬───────────┘
+                                 compact JSON only
+                                       │
+                                       ▼
+                                 Risk assessment
 ```
 
-**PTC** keeps raw tool responses inside the sandbox — the LLM never sees them.
+### PTD: schema loading on demand
 
-**PTD** loads tool schemas on demand — the LLM sees a lightweight catalog (~50 tokens) of Phase B tools and selects what it needs. Clean packages skip Phase B entirely.
+Phase A always runs with 3 core tools (nvd, pypi, github_api) plus a lightweight ~50-token catalog describing 4 Phase B tools. The LLM outputs a `_tools_needed` list. Phase B loads full schemas only for requested tools — or skips entirely if the list is empty.
 
 ## Quick Start
 
@@ -77,6 +81,17 @@ jinja2==3.0.3
 pyyaml==5.4.1
 ```
 
+### Example Output
+
+| Package | Affecting CVEs | Scanned | Risk |
+|---------|---------------|---------|------|
+| requests==2.28.1 | 0 | 50 | low |
+| flask==2.2.2 | 0 | 50 | low |
+| django==4.2.0 | 43 | 50 | high |
+| urllib3==1.26.6 | 5 | 17 | high |
+| jinja2==3.0.3 | 3 | 37 | medium |
+| pyyaml==5.4.1 | 0 | 6 | low |
+
 ## What It Produces
 
 For each package:
@@ -94,7 +109,7 @@ Only CVEs with no CPE data and no parseable version range reach the LLM for inte
 
 ## MCP Servers
 
-7 FastMCP servers communicate via JSON-RPC over stdio:
+The audit tools are implemented as [MCP](https://modelcontextprotocol.io) servers — the standardized interface that lets the LLM-generated scripts call tools the same way on host or inside the Docker sandbox. 7 FastMCP servers communicate via JSON-RPC over stdio:
 
 | Server | Phase | Data Source |
 |--------|-------|-------------|
@@ -110,12 +125,13 @@ Core tools run on every audit. Phase B tools load only when the LLM requests the
 
 ## Token Savings
 
-The system reports two categories of savings vs a traditional ReAct baseline:
+On the 6-package test suite, PTC+PTD achieves a **51% combined token reduction** vs an estimated ReAct baseline:
 
-- **PTC savings** — raw tool responses (NVD CVE data, PyPI metadata, release notes) stay inside the sandbox instead of flowing into the LLM context window
-- **PTD savings** — tool schemas load only for tools the LLM selects; clean packages skip Phase B entirely (0 extra tokens)
+- **27,793 actual tokens** vs **59,942 estimated ReAct tokens** (30,759 saved)
+- **PTC** contributes 50.2% — raw tool responses stay inside the sandbox
+- **PTD** contributes 1.1% — unused tool schemas never loaded
 
-A token savings report is generated after each run.
+Per-package savings vary with data volume: pyyaml (few NVD results) saves 23%, while jinja2 (large NVD payload) saves 62%. A detailed token savings report is generated after each run.
 
 ## Development
 
