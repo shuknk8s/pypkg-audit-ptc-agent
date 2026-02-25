@@ -25,7 +25,9 @@ token-savings-report.md
 # Experiments (standalone copy, fixes merged into src/)
 experiments/
 
-# IDE
+# IDE / local config
 .DS_Store
 .cursor/
 .claude/
+.backup/
+CLAUDE.md
