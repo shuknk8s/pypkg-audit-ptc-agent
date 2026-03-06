@@ -1,3 +1,4 @@
+![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Release](https://img.shields.io/github/v/release/shuknk8s/pypkg-audit-ptc-agent)
 # pypkg-audit-ptc-agent
 
 A Python package security auditor that demonstrates two **MCP-based context engineering patterns** — techniques for controlling what enters the LLM context window when agents use tools.
